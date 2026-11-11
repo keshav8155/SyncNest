@@ -1,0 +1,5 @@
+node_modules/
+.expo/
+master.json
+.DS_Store
+extras/
