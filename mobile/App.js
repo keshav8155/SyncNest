@@ -6,6 +6,7 @@ import {
   Modal,
   TextInput,
   Pressable,
+  ScrollView,
   StyleSheet,
   ActivityIndicator,
   Alert,
@@ -22,6 +23,10 @@ import {
   getAllRecords,
   getPendingRecords,
   saveRecordLocally,
+  updateRecordLocally,
+  deleteRecordLocally,
+  restoreRecordLocally,
+  getVersions,
   markSynced,
   applyServerResponse,
 } from './db';
@@ -61,6 +66,15 @@ const FILTERS = ['All', 'To do', 'Doing', 'Done'];
 
 const PRIORITIES = ['Critical', 'High', 'Medium', 'Low'];
 
+function formatDate(ms) {
+  return new Date(ms).toLocaleString([], {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 // ---------------- MAIN APP ----------------
 
 export default function App() {
@@ -76,6 +90,10 @@ export default function App() {
   const [connected, setConnected] = useState(false);
 
   const [modalVisible, setModalVisible] = useState(false);
+  const [trashVisible, setTrashVisible] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [versions, setVersions] = useState([]);
+  const [editingId, setEditingId] = useState(null);
   const [toast, setToast] = useState('');
 
   // Form fields
@@ -146,7 +164,36 @@ export default function App() {
     }, 3000);
   }
 
-  // ---------------- ADD NEW RECORD ----------------
+  // ---------------- OPEN NEW / EDIT ----------------
+
+  function openNew() {
+    setEditingId(null);
+    setShowHistory(false);
+    setTitle('');
+    setBody('');
+    setLocation('');
+    setPriority('Medium');
+    setStatus('To do');
+    setModalVisible(true);
+  }
+
+  function openEdit(item) {
+    let c = {};
+    try {
+      c = JSON.parse(item.content);
+    } catch {}
+
+    setEditingId(item.id);
+    setShowHistory(false);
+    setTitle(c.title || '');
+    setBody(c.body || '');
+    setLocation(c.location || '');
+    setPriority(c.priority || 'Medium');
+    setStatus(c.status || 'To do');
+    setModalVisible(true);
+  }
+
+  // ---------------- SAVE (NEW OR EDIT) ----------------
 
   async function handleSaveRecord() {
     if (!title.trim()) {
@@ -155,16 +202,34 @@ export default function App() {
     }
 
     try {
-      await saveRecordLocally(
-        title.trim(),
-        body.trim(),
-        priority,
-        location.trim(),
-        status
-      );
+      let message;
+
+      if (editingId) {
+        const changed = await updateRecordLocally(
+          editingId,
+          title.trim(),
+          body.trim(),
+          priority,
+          location.trim(),
+          status
+        );
+        message = changed
+          ? 'Record updated · New version saved'
+          : 'No changes to save';
+      } else {
+        await saveRecordLocally(
+          title.trim(),
+          body.trim(),
+          priority,
+          location.trim(),
+          status
+        );
+        message = 'Record saved · Pending sync';
+      }
 
       await refreshCards();
 
+      setEditingId(null);
       setTitle('');
       setBody('');
       setLocation('');
@@ -173,11 +238,79 @@ export default function App() {
 
       setModalVisible(false);
 
-      showToast('Record saved · Pending sync');
+      showToast(message);
     } catch (error) {
       console.log('Save error:', error);
       Alert.alert('Error', 'Could not save the record.');
     }
+  }
+
+  // ---------------- SOFT DELETE / RESTORE ----------------
+
+  function handleDelete() {
+    Alert.alert(
+      'Move to Recently deleted?',
+      'It will be hidden on all devices after the next sync. You can restore it any time.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Move',
+          style: 'destructive',
+          onPress: async () => {
+            await deleteRecordLocally(editingId);
+            await refreshCards();
+            setEditingId(null);
+            setModalVisible(false);
+            showToast('Moved to Recently deleted · Pending sync');
+          },
+        },
+      ]
+    );
+  }
+
+  async function handleRestoreDeleted(id) {
+    await restoreRecordLocally(id);
+    await refreshCards();
+    showToast('Record restored · Pending sync');
+  }
+
+  // ---------------- VERSION HISTORY ----------------
+
+  async function openHistory() {
+    try {
+      const v = await getVersions(editingId);
+      setVersions(v);
+      setShowHistory(true);
+    } catch (error) {
+      console.log('History error:', error);
+      Alert.alert('Error', 'Could not load version history.');
+    }
+  }
+
+  async function handleRestoreVersion(v) {
+    let c = {};
+    try {
+      c = JSON.parse(v.content);
+    } catch {}
+
+    const changed = await updateRecordLocally(
+      editingId,
+      c.title || '',
+      c.body || '',
+      c.priority || 'Medium',
+      c.location || '',
+      c.status || 'To do',
+      'restored'
+    );
+
+    await refreshCards();
+    setShowHistory(false);
+    setModalVisible(false);
+    setEditingId(null);
+
+    showToast(
+      changed ? 'Version restored · Pending sync' : 'Already the current content'
+    );
   }
 
   // ---------------- SYNC WITH PC HUB ----------------
@@ -219,16 +352,11 @@ export default function App() {
         throw new Error('Invalid sync response from PC Hub');
       }
 
-      // Mark uploaded records as synced.
-      const uploadedIds = changes.map((record) => record.id);
-
-      await markSynced(uploadedIds);
+      // Only clears "pending" if a record was not edited again meanwhile.
+      await markSynced(changes);
 
       // Apply records received from the PC Hub.
-      await applyServerResponse(
-        result.newSeq,
-        result.changes
-      );
+      await applyServerResponse(result.newSeq, result.changes);
 
       await refreshCards();
 
@@ -258,6 +386,10 @@ export default function App() {
     (record) => Number(record.deleted) === 0
   );
 
+  const deletedCards = cards.filter(
+    (record) => Number(record.deleted) === 1
+  );
+
   const visibleCards =
     filter === 'All'
       ? activeCards
@@ -270,7 +402,8 @@ export default function App() {
           }
         });
 
-  const pendingCount = activeCards.filter(
+  // Counts deleted records too, because they also need to sync.
+  const pendingCount = cards.filter(
     (record) => Number(record.pending) === 1
   ).length;
 
@@ -291,7 +424,7 @@ export default function App() {
     const isPending = Number(item.pending) === 1;
 
     return (
-      <View style={styles.card}>
+      <Pressable style={styles.card} onPress={() => openEdit(item)}>
         <View style={styles.cardTop}>
           <Text style={styles.cardTitle}>
             {content.title || 'Untitled Record'}
@@ -343,11 +476,37 @@ export default function App() {
             {isPending ? '◷ Pending' : '✓ Synced'}
           </Text>
         </View>
+      </Pressable>
+    );
+  }
+
+  // ---------------- DELETED CARD (RECENTLY DELETED SCREEN) ----------------
+
+  function renderDeletedCard({ item }) {
+    let c = {};
+    try {
+      c = JSON.parse(item.content);
+    } catch {}
+
+    return (
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>{c.title || 'Untitled Record'}</Text>
+        <Text style={styles.cardBody}>{c.body || 'No description'}</Text>
+
+        <View style={styles.cardBottom}>
+          <Text style={styles.cardLocation}>
+            Deleted {formatDate(item.updatedAt)}
+          </Text>
+
+          <Pressable onPress={() => handleRestoreDeleted(item.id)}>
+            <Text style={styles.restoreText}>Restore</Text>
+          </Pressable>
+        </View>
       </View>
     );
   }
 
-  // ---------------- MAIN SCREEN ----------------
+  // ---------------- LOADING SCREEN ----------------
 
   if (loading) {
     return (
@@ -359,6 +518,8 @@ export default function App() {
       </View>
     );
   }
+
+  // ---------------- MAIN SCREEN ----------------
 
   return (
     <KeyboardAvoidingView
@@ -382,9 +543,7 @@ export default function App() {
           style={[
             styles.connectionBadge,
             {
-              backgroundColor: connected
-                ? '#173A2B'
-                : '#352C1C',
+              backgroundColor: connected ? '#173A2B' : '#352C1C',
             },
           ]}
         >
@@ -392,9 +551,7 @@ export default function App() {
             style={[
               styles.connectionDot,
               {
-                backgroundColor: connected
-                  ? C.green
-                  : C.amber,
+                backgroundColor: connected ? C.green : C.amber,
               },
             ]}
           />
@@ -415,9 +572,7 @@ export default function App() {
 
       <View style={styles.banner}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.bannerTitle}>
-            PC Hub Connection
-          </Text>
+          <Text style={styles.bannerTitle}>PC Hub Connection</Text>
 
           <Text style={styles.bannerSub}>
             {pendingCount} pending · Sequence {lastSeq}
@@ -425,19 +580,14 @@ export default function App() {
         </View>
 
         <Pressable
-          style={[
-            styles.syncButton,
-            syncing && { opacity: 0.6 },
-          ]}
+          style={[styles.syncButton, syncing && { opacity: 0.6 }]}
           onPress={syncNow}
           disabled={syncing}
         >
           {syncing ? (
             <ActivityIndicator color="#0B1F1D" />
           ) : (
-            <Text style={styles.syncButtonText}>
-              Sync Now
-            </Text>
+            <Text style={styles.syncButtonText}>Sync Now</Text>
           )}
         </Pressable>
       </View>
@@ -457,6 +607,17 @@ export default function App() {
           keyboardType="numeric"
         />
       </View>
+
+      {/* RECENTLY DELETED LINK */}
+
+      <Pressable
+        style={styles.trashLink}
+        onPress={() => setTrashVisible(true)}
+      >
+        <Text style={styles.trashLinkText}>
+          🗑 Recently deleted ({deletedCards.length})
+        </Text>
+      </Pressable>
 
       {/* FILTER CHIPS */}
 
@@ -505,152 +666,252 @@ export default function App() {
         <View style={{ flex: 1 }}>
           {toast !== '' && (
             <View style={styles.toast}>
-              <Text style={styles.toastText}>
-                {toast}
-              </Text>
+              <Text style={styles.toastText}>{toast}</Text>
             </View>
           )}
         </View>
 
-        <Pressable
-          style={styles.fab}
-          onPress={() => setModalVisible(true)}
-        >
+        <Pressable style={styles.fab} onPress={openNew}>
           <Text style={styles.fabText}>+</Text>
         </Pressable>
       </View>
 
-      {/* ADD RECORD MODAL */}
+      {/* ADD / EDIT RECORD MODAL */}
 
       <Modal
         visible={modalVisible}
         animationType="slide"
         transparent
-        onRequestClose={() => setModalVisible(false)}
+        onRequestClose={() => {
+          if (showHistory) {
+            setShowHistory(false);
+          } else {
+            setModalVisible(false);
+          }
+        }}
       >
         <KeyboardAvoidingView
           style={styles.modalBackdrop}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
           <View style={styles.modalBox}>
-            <Text style={styles.modalTitle}>
-              Create New Record
-            </Text>
+            {showHistory ? (
+              <>
+                {/* VERSION HISTORY VIEW */}
 
-            <Text style={styles.label}>Title *</Text>
+                <Text style={styles.modalTitle}>Version history</Text>
 
-            <TextInput
-              style={styles.input}
-              placeholder="Enter record title"
-              placeholderTextColor={C.muted}
-              value={title}
-              onChangeText={setTitle}
-            />
+                <ScrollView style={{ maxHeight: 420 }}>
+                  {versions.map((v, index) => {
+                    let c = {};
+                    try {
+                      c = JSON.parse(v.content);
+                    } catch {}
 
-            <Text style={styles.label}>Description</Text>
+                    const isDeleted = Number(v.deleted) === 1;
 
-            <TextInput
-              style={[styles.input, styles.descriptionInput]}
-              placeholder="Describe the situation..."
-              placeholderTextColor={C.muted}
-              value={body}
-              onChangeText={setBody}
-              multiline
-              textAlignVertical="top"
-            />
+                    return (
+                      <View key={v.vid} style={styles.versionRow}>
+                        <View style={styles.versionTop}>
+                          <Text style={styles.versionTitle}>
+                            {index === 0
+                              ? 'Current'
+                              : 'Version ' + (versions.length - index)}
+                          </Text>
 
-            <Text style={styles.label}>Location</Text>
+                          <Text style={styles.versionMeta}>
+                            {formatDate(v.updatedAt)} · {v.deviceId}
+                          </Text>
+                        </View>
 
-            <TextInput
-              style={styles.input}
-              placeholder="Enter location"
-              placeholderTextColor={C.muted}
-              value={location}
-              onChangeText={setLocation}
-            />
+                        {isDeleted ? (
+                          <Text style={styles.versionBody}>
+                            🗑 Moved to Recently deleted
+                          </Text>
+                        ) : (
+                          <>
+                            <Text style={styles.versionText}>{c.title}</Text>
+                            <Text style={styles.versionBody}>{c.body}</Text>
+                            <Text style={styles.versionMeta}>
+                              {c.priority} · {c.status} · 📍 {c.location || '-'}
+                            </Text>
+                          </>
+                        )}
 
-            {/* PRIORITY SELECTION */}
+                        {index !== 0 && !isDeleted && (
+                          <Pressable onPress={() => handleRestoreVersion(v)}>
+                            <Text style={styles.restoreText}>
+                              Restore this version
+                            </Text>
+                          </Pressable>
+                        )}
+                      </View>
+                    );
+                  })}
+                </ScrollView>
 
-            <Text style={styles.label}>Priority</Text>
+                <Pressable onPress={() => setShowHistory(false)}>
+                  <Text style={styles.cancel}>Back</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                {/* FORM VIEW */}
 
-            <View style={styles.pickRow}>
-              {PRIORITIES.map((p) => (
+                <Text style={styles.modalTitle}>
+                  {editingId ? 'Edit Record' : 'Create New Record'}
+                </Text>
+
+                <Text style={styles.label}>Title *</Text>
+
+                <TextInput
+                  style={styles.input}
+                  placeholder="Enter record title"
+                  placeholderTextColor={C.muted}
+                  value={title}
+                  onChangeText={setTitle}
+                />
+
+                <Text style={styles.label}>Description</Text>
+
+                <TextInput
+                  style={[styles.input, styles.descriptionInput]}
+                  placeholder="Describe the situation..."
+                  placeholderTextColor={C.muted}
+                  value={body}
+                  onChangeText={setBody}
+                  multiline
+                  textAlignVertical="top"
+                />
+
+                <Text style={styles.label}>Location</Text>
+
+                <TextInput
+                  style={styles.input}
+                  placeholder="Enter location"
+                  placeholderTextColor={C.muted}
+                  value={location}
+                  onChangeText={setLocation}
+                />
+
+                {/* PRIORITY SELECTION */}
+
+                <Text style={styles.label}>Priority</Text>
+
+                <View style={styles.pickRow}>
+                  {PRIORITIES.map((p) => (
+                    <Pressable
+                      key={p}
+                      onPress={() => setPriority(p)}
+                      style={[
+                        styles.pick,
+                        priority === p && {
+                          backgroundColor: PRIORITY[p].bg,
+                          borderColor: PRIORITY[p].fg,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={{
+                          color: priority === p ? PRIORITY[p].fg : C.muted,
+                        }}
+                      >
+                        {p}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                {/* STATUS SELECTION */}
+
+                <Text style={styles.label}>Status</Text>
+
+                <View style={styles.pickRow}>
+                  {FILTERS.slice(1).map((s) => (
+                    <Pressable
+                      key={s}
+                      onPress={() => setStatus(s)}
+                      style={[
+                        styles.pick,
+                        status === s && {
+                          backgroundColor: STATUS[s].bg,
+                          borderColor: STATUS[s].fg,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={{
+                          color: status === s ? STATUS[s].fg : C.muted,
+                        }}
+                      >
+                        {s}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                {/* SAVE BUTTON */}
+
                 <Pressable
-                  key={p}
-                  onPress={() => setPriority(p)}
-                  style={[
-                    styles.pick,
-                    priority === p && {
-                      backgroundColor: PRIORITY[p].bg,
-                      borderColor: PRIORITY[p].fg,
-                    },
-                  ]}
+                  style={styles.saveButton}
+                  onPress={handleSaveRecord}
                 >
-                  <Text
-                    style={{
-                      color:
-                        priority === p
-                          ? PRIORITY[p].fg
-                          : C.muted,
-                    }}
-                  >
-                    {p}
+                  <Text style={styles.saveButtonText}>
+                    {editingId ? 'Save Changes' : 'Save Record'}
                   </Text>
                 </Pressable>
-              ))}
-            </View>
 
-            {/* STATUS SELECTION */}
+                {editingId && (
+                  <Pressable onPress={openHistory}>
+                    <Text style={styles.historyLink}>
+                      🕘 View version history
+                    </Text>
+                  </Pressable>
+                )}
 
-            <Text style={styles.label}>Status</Text>
+                {editingId && (
+                  <Pressable onPress={handleDelete}>
+                    <Text style={styles.deleteText}>
+                      Move to Recently deleted
+                    </Text>
+                  </Pressable>
+                )}
 
-            <View style={styles.pickRow}>
-              {FILTERS.slice(1).map((s) => (
-                <Pressable
-                  key={s}
-                  onPress={() => setStatus(s)}
-                  style={[
-                    styles.pick,
-                    status === s && {
-                      backgroundColor: STATUS[s].bg,
-                      borderColor: STATUS[s].fg,
-                    },
-                  ]}
-                >
-                  <Text
-                    style={{
-                      color:
-                        status === s
-                          ? STATUS[s].fg
-                          : C.muted,
-                    }}
-                  >
-                    {s}
-                  </Text>
+                <Pressable onPress={() => setModalVisible(false)}>
+                  <Text style={styles.cancel}>Cancel</Text>
                 </Pressable>
-              ))}
-            </View>
-
-            {/* SAVE BUTTON */}
-
-            <Pressable
-              style={styles.saveButton}
-              onPress={handleSaveRecord}
-            >
-              <Text style={styles.saveButtonText}>
-                Save Record
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => setModalVisible(false)}
-            >
-              <Text style={styles.cancel}>
-                Cancel
-              </Text>
-            </Pressable>
+              </>
+            )}
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* RECENTLY DELETED SCREEN */}
+
+      <Modal
+        visible={trashVisible}
+        animationType="slide"
+        onRequestClose={() => setTrashVisible(false)}
+      >
+        <View style={styles.fullScreen}>
+          <View style={styles.sheetHeader}>
+            <Text style={styles.modalTitle}>Recently deleted</Text>
+
+            <Pressable onPress={() => setTrashVisible(false)}>
+              <Text style={styles.restoreText}>Close</Text>
+            </Pressable>
+          </View>
+
+          <FlatList
+            data={deletedCards}
+            keyExtractor={(item) => item.id}
+            renderItem={renderDeletedCard}
+            contentContainerStyle={{ padding: 16 }}
+            ListEmptyComponent={
+              <Text style={styles.emptyText}>Nothing here</Text>
+            }
+          />
+        </View>
       </Modal>
     </KeyboardAvoidingView>
   );
@@ -778,6 +1039,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 9,
     fontSize: 14,
+  },
+
+  // RECENTLY DELETED LINK
+
+  trashLink: {
+    alignSelf: 'flex-end',
+    marginRight: 18,
+    marginTop: 12,
+  },
+
+  trashLinkText: {
+    color: C.muted,
+    fontSize: 12,
+    fontWeight: '600',
   },
 
   // FILTERS
@@ -1018,10 +1293,88 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
 
+  historyLink: {
+    textAlign: 'center',
+    color: C.teal,
+    marginTop: 16,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+
+  deleteText: {
+    textAlign: 'center',
+    color: C.red,
+    marginTop: 14,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+
   cancel: {
     textAlign: 'center',
     color: C.muted,
     marginTop: 16,
     fontSize: 14,
+  },
+
+  // RECENTLY DELETED SCREEN
+
+  fullScreen: {
+    flex: 1,
+    backgroundColor: C.bg,
+    paddingTop: 54,
+  },
+
+  sheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+
+  restoreText: {
+    color: C.teal,
+    fontWeight: '700',
+    fontSize: 13,
+    marginTop: 8,
+  },
+
+  // VERSION HISTORY
+
+  versionRow: {
+    backgroundColor: C.bg,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+  },
+
+  versionTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+
+  versionTitle: {
+    color: C.teal,
+    fontWeight: '700',
+    fontSize: 13,
+  },
+
+  versionMeta: {
+    color: C.muted,
+    fontSize: 11,
+  },
+
+  versionText: {
+    color: C.text,
+    fontWeight: '700',
+    fontSize: 15,
+  },
+
+  versionBody: {
+    color: C.muted,
+    fontSize: 13,
+    marginVertical: 4,
   },
 });

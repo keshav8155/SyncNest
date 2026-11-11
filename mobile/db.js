@@ -1,4 +1,3 @@
-
 import * as SQLite from 'expo-sqlite';
 
 const DB_NAME = 'syncnest.db';
@@ -24,6 +23,19 @@ export async function initDb() {
       key TEXT PRIMARY KEY NOT NULL,
       value TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS versions (
+      vid TEXT PRIMARY KEY NOT NULL,
+      recordId TEXT NOT NULL,
+      content TEXT NOT NULL,
+      updatedAt INTEGER NOT NULL,
+      deleted INTEGER DEFAULT 0,
+      deviceId TEXT NOT NULL,
+      action TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_versions_record
+      ON versions(recordId, updatedAt);
   `);
 
   let device = await database.getFirstAsync(
@@ -32,9 +44,7 @@ export async function initDb() {
   );
 
   if (!device) {
-    currentDeviceId =
-      'Phone_' + Math.random().toString(36).substring(2, 8);
-
+    currentDeviceId = 'Phone_' + Math.random().toString(36).substring(2, 8);
     await database.runAsync(
       'INSERT INTO meta (key, value) VALUES (?, ?)',
       ['deviceId', currentDeviceId]
@@ -55,6 +65,15 @@ export async function initDb() {
     );
   }
 
+  // Backfill: give records that existed before versions a first version.
+  await database.execAsync(`
+    INSERT OR IGNORE INTO versions
+      (vid, recordId, content, updatedAt, deleted, deviceId, action)
+    SELECT id || '_' || updatedAt || '_' || deviceId,
+           id, content, updatedAt, deleted, deviceId, 'created'
+    FROM records;
+  `);
+
   return currentDeviceId;
 }
 
@@ -67,9 +86,30 @@ export async function getLastSeq() {
     'SELECT value FROM meta WHERE key = ?',
     ['lastSeq']
   );
-
   return Number(result?.value || 0);
 }
+
+// ---------- version helper (append-only, duplicates are ignored) ----------
+
+async function addVersion(rec, action) {
+  const vid = `${rec.id}_${rec.updatedAt}_${rec.deviceId}`;
+  await database.runAsync(
+    `INSERT OR IGNORE INTO versions
+     (vid, recordId, content, updatedAt, deleted, deviceId, action)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      vid,
+      rec.id,
+      rec.content,
+      rec.updatedAt,
+      Number(rec.deleted) || 0,
+      rec.deviceId,
+      action,
+    ]
+  );
+}
+
+// ---------- create / edit / delete / restore ----------
 
 export async function saveRecordLocally(
   title,
@@ -84,32 +124,122 @@ export async function saveRecordLocally(
     currentDeviceId + '_' + now + '_' +
     Math.random().toString(36).substring(2, 7);
 
-  const content = JSON.stringify({
-    title,
-    body,
-    priority,
-    status,
-    location
-  });
+  const content = JSON.stringify({ title, body, priority, status, location });
 
-  await database.runAsync(
-    `INSERT INTO records
-    (id, content, updatedAt, deleted, deviceId, seq, pending)
-    VALUES (?, ?, ?, 0, ?, 0, 1)`,
-    [id, content, now, currentDeviceId]
-  );
-
-  return {
+  const record = {
     id,
     content,
     updatedAt: now,
     deleted: 0,
     deviceId: currentDeviceId,
     seq: 0,
-    pending: 1
+    pending: 1,
   };
+
+  await database.runAsync(
+    `INSERT INTO records
+     (id, content, updatedAt, deleted, deviceId, seq, pending)
+     VALUES (?, ?, ?, 0, ?, 0, 1)`,
+    [id, content, now, currentDeviceId]
+  );
+
+  await addVersion(record, 'created');
+
+  return record;
 }
 
+// Returns true if something changed, false if the content was identical.
+export async function updateRecordLocally(
+  id,
+  title,
+  body,
+  priority,
+  location,
+  status,
+  action = 'edited'
+) {
+  const existing = await database.getFirstAsync(
+    'SELECT * FROM records WHERE id = ?',
+    [id]
+  );
+  if (!existing) return false;
+
+  const content = JSON.stringify({ title, body, priority, status, location });
+
+  if (existing.content === content && Number(existing.deleted) === 0) {
+    return false;
+  }
+
+  // Always newer than the version being edited, even if this clock is behind.
+  const now = Math.max(Date.now(), existing.updatedAt + 1);
+
+  await database.runAsync(
+    `UPDATE records
+     SET content = ?, updatedAt = ?, deviceId = ?, pending = 1
+     WHERE id = ?`,
+    [content, now, currentDeviceId, id]
+  );
+
+  await addVersion(
+    { id, content, updatedAt: now, deleted: 0, deviceId: currentDeviceId },
+    action
+  );
+
+  return true;
+}
+
+// Soft delete: the row stays, it is only flagged.
+export async function deleteRecordLocally(id) {
+  const existing = await database.getFirstAsync(
+    'SELECT * FROM records WHERE id = ?',
+    [id]
+  );
+  if (!existing) return false;
+
+  const now = Math.max(Date.now(), existing.updatedAt + 1);
+
+  await database.runAsync(
+    `UPDATE records
+     SET deleted = 1, updatedAt = ?, deviceId = ?, pending = 1
+     WHERE id = ?`,
+    [now, currentDeviceId, id]
+  );
+
+  await addVersion(
+    { id, content: existing.content, updatedAt: now, deleted: 1, deviceId: currentDeviceId },
+    'deleted'
+  );
+
+  return true;
+}
+
+export async function restoreRecordLocally(id) {
+  const existing = await database.getFirstAsync(
+    'SELECT * FROM records WHERE id = ?',
+    [id]
+  );
+  if (!existing) return false;
+
+  const now = Math.max(Date.now(), existing.updatedAt + 1);
+
+  await database.runAsync(
+    `UPDATE records
+     SET deleted = 0, updatedAt = ?, deviceId = ?, pending = 1
+     WHERE id = ?`,
+    [now, currentDeviceId, id]
+  );
+
+  await addVersion(
+    { id, content: existing.content, updatedAt: now, deleted: 0, deviceId: currentDeviceId },
+    'restored'
+  );
+
+  return true;
+}
+
+// ---------- reading ----------
+
+// Includes deleted rows. App.js filters them into the list / Recently deleted.
 export async function getAllRecords() {
   return await database.getAllAsync(
     'SELECT * FROM records ORDER BY updatedAt DESC'
@@ -122,11 +252,25 @@ export async function getPendingRecords() {
   );
 }
 
-export async function markSynced(syncedIds) {
-  for (const id of syncedIds) {
+// Newest first. The first row is the current version.
+export async function getVersions(recordId) {
+  return await database.getAllAsync(
+    `SELECT * FROM versions
+     WHERE recordId = ?
+     ORDER BY updatedAt DESC, deviceId DESC`,
+    [recordId]
+  );
+}
+
+// ---------- syncing ----------
+
+// Takes the uploaded record objects. Only clears pending if the record
+// has not been edited again since it was uploaded.
+export async function markSynced(uploadedRecords) {
+  for (const r of uploadedRecords) {
     await database.runAsync(
-      'UPDATE records SET pending = 0 WHERE id = ?',
-      [id]
+      'UPDATE records SET pending = 0 WHERE id = ? AND updatedAt = ?',
+      [r.id, r.updatedAt]
     );
   }
 }
@@ -136,6 +280,18 @@ export async function applyServerResponse(newSeq, changes) {
     const local = await database.getFirstAsync(
       'SELECT * FROM records WHERE id = ?',
       [incoming.id]
+    );
+
+    // Keep every version we hear about, whether it wins or loses.
+    await addVersion(
+      {
+        id: incoming.id,
+        content: incoming.content,
+        updatedAt: incoming.updatedAt,
+        deleted: incoming.deleted,
+        deviceId: incoming.deviceId,
+      },
+      'received'
     );
 
     const shouldUpdate =
@@ -149,15 +305,15 @@ export async function applyServerResponse(newSeq, changes) {
     if (shouldUpdate) {
       await database.runAsync(
         `INSERT OR REPLACE INTO records
-        (id, content, updatedAt, deleted, deviceId, seq, pending)
-        VALUES (?, ?, ?, ?, ?, ?, 0)`,
+         (id, content, updatedAt, deleted, deviceId, seq, pending)
+         VALUES (?, ?, ?, ?, ?, ?, 0)`,
         [
           incoming.id,
           incoming.content,
           incoming.updatedAt,
-          incoming.deleted,
+          Number(incoming.deleted) || 0,
           incoming.deviceId,
-          incoming.seq
+          incoming.seq,
         ]
       );
     }
