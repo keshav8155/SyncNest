@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -12,6 +12,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  Switch,
 } from 'react-native';
 
 import { StatusBar } from 'expo-status-bar';
@@ -81,6 +82,11 @@ export default function App() {
   const [cards, setCards] = useState([]);
   const [deviceId, setDeviceId] = useState('Loading...');
   const [lastSeq, setLastSeq] = useState(0);
+
+  const [autoSync, setAutoSync] = useState(true);
+  const syncingRef = useRef(false);
+  const pcIpRef = useRef(DEFAULT_PC_IP);
+  const syncNowRef = useRef(null);
 
   const [pcIp, setPcIp] = useState(DEFAULT_PC_IP);
   const [filter, setFilter] = useState('All');
@@ -315,70 +321,102 @@ export default function App() {
 
   // ---------------- SYNC WITH PC HUB ----------------
 
-  async function syncNow() {
-    if (syncing) return;
+  async function syncNow({ silent = false } = {}) {
+  if (syncingRef.current) return;
 
-    setSyncing(true);
+  syncingRef.current = true;
+  if (!silent) setSyncing(true);
 
-    try {
-      const changes = await getPendingRecords();
-      const currentSeq = await getLastSeq();
+  // Give up quickly if the hub is unreachable
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
 
-      const response = await fetch(
-        `http://${pcIp.trim()}:${SERVER_PORT}/sync`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            deviceId: getDeviceId(),
-            lastSeq: currentSeq,
-            changes,
-          }),
-        }
-      );
+  try {
+    const changes = await getPendingRecords();
+    const currentSeq = await getLastSeq();
 
-      if (!response.ok) {
-        throw new Error(`Server returned HTTP ${response.status}`);
+    const response = await fetch(
+      `http://${pcIpRef.current.trim()}:${SERVER_PORT}/sync`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: getDeviceId(),
+          lastSeq: currentSeq,
+          changes,
+        }),
+        signal: controller.signal,
       }
+    );
 
-      const result = await response.json();
+    if (!response.ok) {
+      throw new Error(`Server returned HTTP ${response.status}`);
+    }
 
-      if (
-        typeof result.newSeq !== 'number' ||
-        !Array.isArray(result.changes)
-      ) {
-        throw new Error('Invalid sync response from PC Hub');
-      }
+    const result = await response.json();
 
-      // Only clears "pending" if a record was not edited again meanwhile.
-      await markSynced(changes);
+    if (
+      typeof result.newSeq !== 'number' ||
+      !Array.isArray(result.changes)
+    ) {
+      throw new Error('Invalid sync response from PC Hub');
+    }
 
-      // Apply records received from the PC Hub.
-      await applyServerResponse(result.newSeq, result.changes);
+    await markSynced(changes);
+    await applyServerResponse(result.newSeq, result.changes);
 
+    const myId = getDeviceId();
+    const uploaded = changes.length;
+    const downloaded = result.changes.filter(
+      (r) => r.deviceId !== myId
+    ).length;
+
+    if (uploaded > 0 || result.changes.length > 0) {
       await refreshCards();
+    }
 
-      setConnected(true);
+    setConnected(true);
 
+    if (!silent) {
       showToast(
-        changes.length > 0
-          ? `Sync complete · ${changes.length} uploaded`
+        uploaded > 0 || downloaded > 0
+          ? `Sync complete · ↑${uploaded} ↓${downloaded}`
           : 'Sync complete · Up to date'
       );
-    } catch (error) {
-      console.log('Sync error:', error);
-      setConnected(false);
+    } else if (uploaded > 0 || downloaded > 0) {
+      showToast(`Synced · ↑${uploaded} ↓${downloaded}`);
+    }
+  } catch (error) {
+    console.log('Sync error:', error?.message || error);
+    setConnected(false);
 
+    if (!silent) {
       Alert.alert(
         'Sync Failed',
         'Could not connect to the PC Hub. Check the IP address, Wi-Fi and server status.'
       );
-    } finally {
-      setSyncing(false);
     }
+  } finally {
+    clearTimeout(timer);
+    syncingRef.current = false;
+    if (!silent) setSyncing(false);
   }
+}
+
+ // ---------------- AUTO SYNC ----------------
+
+  syncNowRef.current = syncNow;
+
+  useEffect(() => {
+    if (loading || !autoSync) return;
+
+    const run = () => syncNowRef.current({ silent: true });
+
+    run(); // once right away
+    const id = setInterval(run, 2000);
+
+    return () => clearInterval(id);
+  }, [loading, autoSync]);
 
   // ---------------- FILTER RECORDS ----------------
 
@@ -581,7 +619,7 @@ export default function App() {
 
         <Pressable
           style={[styles.syncButton, syncing && { opacity: 0.6 }]}
-          onPress={syncNow}
+          onPress={() => syncNow()}
           disabled={syncing}
         >
           {syncing ? (
@@ -595,12 +633,27 @@ export default function App() {
       {/* PC IP ADDRESS */}
 
       <View style={styles.ipContainer}>
-        <Text style={styles.ipLabel}>HUB IP ADDRESS</Text>
+        <View style={styles.ipHeader}>
+          <Text style={styles.ipLabel}>HUB IP ADDRESS</Text>
+
+          <View style={styles.autoRow}>
+            <Text style={styles.autoLabel}>Auto-sync</Text>
+            <Switch
+              value={autoSync}
+              onValueChange={setAutoSync}
+              trackColor={{ false: C.border, true: C.tealDark }}
+              thumbColor={autoSync ? C.teal : C.muted}
+            />
+          </View>
+        </View>
 
         <TextInput
           style={styles.ipInput}
           value={pcIp}
-          onChangeText={setPcIp}
+          onChangeText={(text) => {
+            setPcIp(text);
+            pcIpRef.current = text;
+          }}
           placeholder="192.168.1.9"
           placeholderTextColor={C.muted}
           autoCapitalize="none"
@@ -1377,4 +1430,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginVertical: 4,
   },
+
+  // AUTO SYNC
+
+  ipHeader: {
+  flexDirection: 'row',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+},
+autoRow: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 6,
+},
+autoLabel: {
+  color: C.muted,
+  fontSize: 11,
+  fontWeight: '700',
+},
 });
