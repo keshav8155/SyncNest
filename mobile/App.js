@@ -15,6 +15,8 @@ import {
   Switch,
 } from 'react-native';
 
+import { CameraView, useCameraPermissions } from 'expo-camera';
+
 import { StatusBar } from 'expo-status-bar';
 
 import {
@@ -30,6 +32,12 @@ import {
   getVersions,
   markSynced,
   applyServerResponse,
+  getPendingVersions,
+  markVersionsUploaded,
+  applyServerVersions,
+  getLastVersionSeq,
+  getHubIp,
+  setHubIp,
 } from './db';
 
 // ---------------- CONFIGURATION ----------------
@@ -109,6 +117,11 @@ export default function App() {
   const [priority, setPriority] = useState('Medium');
   const [status, setStatus] = useState('To do');
 
+  // QR scanner
+  const [scanVisible, setScanVisible] = useState(false);
+  const [permission, requestPermission] = useCameraPermissions();
+  const scannedRef = useRef(false);
+
   // ---------------- DATABASE INITIALIZATION ----------------
 
   useEffect(() => {
@@ -117,14 +130,18 @@ export default function App() {
     async function startApp() {
       try {
         const id = await initDb();
-
         const records = await getAllRecords();
         const seq = await getLastSeq();
+        const savedIp = await getHubIp();
 
         if (mounted) {
           setDeviceId(id);
           setCards(records);
           setLastSeq(seq);
+          if (savedIp) {
+            setPcIp(savedIp);
+            pcIpRef.current = savedIp;
+          }
         }
       } catch (error) {
         console.log('Database initialization error:', error);
@@ -319,6 +336,45 @@ export default function App() {
     );
   }
 
+  // QR Scanner
+
+  async function openScanner() {
+  if (!permission?.granted) {
+    const res = await requestPermission();
+    if (!res.granted) {
+      Alert.alert('Camera needed', 'Allow camera access to scan the hub QR code.');
+      return;
+    }
+  }
+  scannedRef.current = false;
+  setScanVisible(true);
+}
+
+async function handleScanned({ data }) {
+  if (scannedRef.current) return;
+
+  try {
+    const info = JSON.parse(data);
+
+    if (
+      info.app !== 'syncnest' ||
+      typeof info.ip !== 'string' ||
+      !/^[\w.-]+$/.test(info.ip)
+    ) {
+      return; // not a SyncNest code, keep scanning
+    }
+
+    scannedRef.current = true;
+    setPcIp(info.ip);
+    pcIpRef.current = info.ip;
+    await setHubIp(info.ip);
+    setScanVisible(false);
+    showToast(`Hub set to ${info.ip}`);
+  } catch {
+    // not JSON, ignore and keep scanning
+  }
+}
+
   // ---------------- SYNC WITH PC HUB ----------------
 
   async function syncNow({ silent = false } = {}) {
@@ -333,7 +389,9 @@ export default function App() {
 
   try {
     const changes = await getPendingRecords();
-    const currentSeq = await getLastSeq();
+  const pendingVersions = await getPendingVersions();
+  const currentSeq = await getLastSeq();
+  const currentVersionSeq = await getLastVersionSeq();
 
     const response = await fetch(
       `http://${pcIpRef.current.trim()}:${SERVER_PORT}/sync`,
@@ -344,6 +402,8 @@ export default function App() {
           deviceId: getDeviceId(),
           lastSeq: currentSeq,
           changes,
+          versions: pendingVersions,
+          lastVersionSeq: currentVersionSeq,
         }),
         signal: controller.signal,
       }
@@ -364,6 +424,15 @@ export default function App() {
 
     await markSynced(changes);
     await applyServerResponse(result.newSeq, result.changes);
+
+    // Version history (only if the hub supports it)
+    if (
+      typeof result.newVersionSeq === 'number' &&
+      Array.isArray(result.versions)
+    ) {
+      await applyServerVersions(result.newVersionSeq, result.versions);
+      await markVersionsUploaded(pendingVersions);
+    }
 
     const myId = getDeviceId();
     const uploaded = changes.length;
@@ -647,18 +716,25 @@ export default function App() {
           </View>
         </View>
 
-        <TextInput
-          style={styles.ipInput}
-          value={pcIp}
-          onChangeText={(text) => {
-            setPcIp(text);
-            pcIpRef.current = text;
-          }}
-          placeholder="192.168.1.9"
-          placeholderTextColor={C.muted}
-          autoCapitalize="none"
-          keyboardType="numeric"
-        />
+        <View style={styles.ipRow}>
+          <TextInput
+            style={[styles.ipInput, { flex: 1 }]}
+            value={pcIp}
+            onChangeText={(text) => {
+              setPcIp(text);
+              pcIpRef.current = text;
+            }}
+            onEndEditing={() => setHubIp(pcIpRef.current.trim())}
+            placeholder="192.168.1.9"
+            placeholderTextColor={C.muted}
+            autoCapitalize="none"
+            keyboardType="numeric"
+          />
+
+          <Pressable style={styles.scanButton} onPress={openScanner}>
+            <Text style={styles.scanButtonText}>Scan QR</Text>
+          </Pressable>
+        </View>
       </View>
 
       {/* RECENTLY DELETED LINK */}
@@ -966,9 +1042,39 @@ export default function App() {
           />
         </View>
       </Modal>
+
+      {/* QR SCANNER SCREEN */}             
+
+      <Modal
+        visible={scanVisible}
+        animationType="slide"
+        onRequestClose={() => setScanVisible(false)}
+      >
+        <View style={styles.fullScreen}>
+          <View style={styles.sheetHeader}>
+            <Text style={styles.modalTitle}>Scan hub QR code</Text>
+
+            <Pressable onPress={() => setScanVisible(false)}>
+              <Text style={styles.restoreText}>Close</Text>
+            </Pressable>
+          </View>
+
+          <CameraView
+            style={styles.camera}
+            facing="back"
+            barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+            onBarcodeScanned={handleScanned}
+          />
+
+          <Text style={styles.scanHint}>
+            Point at the QR code on the PC dashboard
+          </Text>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
+
 
 // ---------------- STYLES ----------------
 
@@ -1448,4 +1554,18 @@ autoLabel: {
   fontSize: 11,
   fontWeight: '700',
 },
+
+// QR Scanner
+ipRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+scanButton: {
+  backgroundColor: C.tealDark,
+  borderWidth: 1,
+  borderColor: C.teal,
+  borderRadius: 10,
+  paddingHorizontal: 14,
+  paddingVertical: 10,
+},
+scanButtonText: { color: C.teal, fontWeight: '700', fontSize: 13 },
+camera: { flex: 1, margin: 16, borderRadius: 16, overflow: 'hidden' },
+scanHint: { color: C.muted, textAlign: 'center', paddingBottom: 30 },
 });

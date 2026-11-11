@@ -89,6 +89,25 @@ export async function getLastSeq() {
   return Number(result?.value || 0);
 }
 
+async function getMetaNumber(key) {
+  const r = await database.getFirstAsync(
+    'SELECT value FROM meta WHERE key = ?',
+    [key]
+  );
+  return Number(r?.value || 0);
+}
+
+async function setMeta(key, value) {
+  await database.runAsync(
+    'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+    [key, String(value)]
+  );
+}
+
+export async function getLastVersionSeq() {
+  return await getMetaNumber('lastVersionSeq');
+}
+
 // ---------- version helper (append-only, duplicates are ignored) ----------
 
 async function addVersion(rec, action) {
@@ -323,4 +342,52 @@ export async function applyServerResponse(newSeq, changes) {
     'UPDATE meta SET value = ? WHERE key = ?',
     [String(newSeq), 'lastSeq']
   );
+}
+
+// Versions created on this phone that the hub has not received yet.
+export async function getPendingVersions() {
+  const last = await getMetaNumber('lastUploadedVersionRow');
+
+  return await database.getAllAsync(
+    `SELECT vid, recordId, content, updatedAt, deleted, deviceId, action,
+            rowid AS rid
+     FROM versions
+     WHERE rowid > ? AND COALESCE(action, '') != 'received'
+     ORDER BY rowid`,
+    [last]
+  );
+}
+
+export async function markVersionsUploaded(uploaded) {
+  if (uploaded.length === 0) return;
+  const maxRid = Math.max(...uploaded.map(v => v.rid));
+  await setMeta('lastUploadedVersionRow', maxRid);
+}
+
+export async function applyServerVersions(newVersionSeq, versions) {
+  for (const v of versions) {
+    await addVersion(
+      {
+        id: v.recordId,
+        content: v.content,
+        updatedAt: v.updatedAt,
+        deleted: v.deleted,
+        deviceId: v.deviceId,
+      },
+      'received'
+    );
+  }
+  await setMeta('lastVersionSeq', newVersionSeq);
+}
+
+export async function getHubIp() {
+  const r = await database.getFirstAsync(
+    'SELECT value FROM meta WHERE key = ?',
+    ['hubIp']
+  );
+  return r?.value || null;
+}
+
+export async function setHubIp(ip) {
+  await setMeta('hubIp', ip);
 }

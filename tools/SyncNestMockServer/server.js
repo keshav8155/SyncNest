@@ -1,20 +1,22 @@
-
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-
+const os = require('os');
+const QRCode = require('qrcode');
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 const PORT = 3000;
 const DB_FILE = path.join(__dirname, 'master.json');
 
 let master = {
   seqCounter: 0,
-  records: {}
+  records: {},
+  versionSeq: 0,
+  versions: {}
 };
 
 let recentEvents = [];
@@ -27,6 +29,9 @@ if (fs.existsSync(DB_FILE)) {
     console.error('Could not read master.json:', error);
   }
 }
+
+master.versions = master.versions || {};
+master.versionSeq = master.versionSeq || 0;
 
 function saveMaster() {
   const tempFile = DB_FILE + '.tmp';
@@ -63,6 +68,98 @@ function getChangesSince(lastSeq) {
   );
 }
 
+function addVersions(list) {
+  for (const v of list) {
+    if (
+      !v ||
+      typeof v.recordId !== 'string' ||
+      typeof v.content !== 'string' ||
+      !Number.isFinite(v.updatedAt) ||
+      typeof v.deviceId !== 'string'
+    ) continue;
+
+    const vid = `${v.recordId}_${v.updatedAt}_${v.deviceId}`;
+    if (master.versions[vid]) continue;
+
+    master.versionSeq++;
+    master.versions[vid] = {
+      vid,
+      recordId: v.recordId,
+      content: v.content,
+      updatedAt: v.updatedAt,
+      deleted: Number(v.deleted) ? 1 : 0,
+      deviceId: v.deviceId,
+      action: v.action || 'received',
+      vseq: master.versionSeq
+    };
+  }
+}
+
+function getVersionsSince(lastVersionSeq) {
+  return Object.values(master.versions).filter(
+    v => v.vseq > lastVersionSeq
+  );
+}
+
+// Changes since lastSeq, plus the winning record for any edit the hub rejected.
+function getResponseChanges(lastSeq, incoming) {
+  const out = new Map();
+
+  for (const r of getChangesSince(lastSeq)) out.set(r.id, r);
+
+  for (const c of incoming) {
+    const winner = master.records[c.id];
+    if (winner && winner.seq <= lastSeq) out.set(winner.id, winner);
+  }
+
+  return Array.from(out.values());
+}
+
+function getLanIp() {
+  if (process.env.HUB_IP) return process.env.HUB_IP;
+
+  const candidates = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const i of list || []) {
+      if ((i.family === 'IPv4' || i.family === 4) && !i.internal) {
+        candidates.push(i.address);
+      }
+    }
+  }
+
+  return (
+    candidates.find(ip => ip.startsWith('192.168.')) ||
+    candidates.find(ip => ip.startsWith('10.')) ||
+    candidates.find(ip => /^172\.(1[6-9]|2\d|3[01])\./.test(ip)) ||
+    candidates[0] ||
+    'localhost'
+  );
+}
+
+app.get('/hub-info', (req, res) => {
+  const ip = getLanIp();
+  res.json({ ip, port: PORT, url: `http://${ip}:${PORT}` });
+});
+
+app.get('/qr.svg', async (req, res) => {
+  try {
+    const payload = JSON.stringify({
+      app: 'syncnest',
+      ip: getLanIp(),
+      port: PORT
+    });
+    const svg = await QRCode.toString(payload, {
+      type: 'svg',
+      margin: 1,
+      width: 260
+    });
+    res.set('Cache-Control', 'no-store');
+    res.type('image/svg+xml').send(svg);
+  } catch (error) {
+    res.status(500).send('Could not create QR code');
+  }
+});
+
 // Health check
 app.get('/status', (req, res) => {
   res.json({
@@ -88,12 +185,20 @@ app.get('/records', (req, res) => {
 // Synchronization endpoint
 app.post('/sync', (req, res) => {
   try {
-    const { deviceId, lastSeq = 0, changes = [] } = req.body;
+    const {
+      deviceId,
+      lastSeq = 0,
+      changes = [],
+      versions = [],
+      lastVersionSeq = 0
+    } = req.body;
 
     if (
       typeof deviceId !== 'string' ||
       !Array.isArray(changes) ||
+      !Array.isArray(versions) ||
       !Number.isFinite(Number(lastSeq)) ||
+      !Number.isFinite(Number(lastVersionSeq)) ||
       !changes.every(record =>
         record &&
         typeof record.id === 'string' &&
@@ -102,21 +207,33 @@ app.post('/sync', (req, res) => {
         typeof record.deviceId === 'string'
       )
     ) {
-      return res.status(400).json({
-        error: 'Invalid sync payload'
-      });
+      return res.status(400).json({ error: 'Invalid sync payload' });
     }
 
     activeDevices.add(deviceId);
 
     mergeChanges(changes);
+
+    // Keep every version: the ones the phone sent, plus every incoming record.
+    addVersions(versions);
+    addVersions(changes.map(c => ({
+      recordId: c.id,
+      content: c.content,
+      updatedAt: c.updatedAt,
+      deleted: c.deleted,
+      deviceId: c.deviceId,
+      action: 'received'
+    })));
+
     saveMaster();
+
+    const responseChanges = getResponseChanges(Number(lastSeq), changes);
 
     const event = {
       timestamp: new Date().toISOString(),
       deviceId,
       receivedCount: changes.length,
-      sentCount: getChangesSince(Number(lastSeq)).length
+      sentCount: responseChanges.length
     };
 
     recentEvents.unshift(event);
@@ -124,16 +241,24 @@ app.post('/sync', (req, res) => {
 
     res.json({
       newSeq: master.seqCounter,
-      changes: getChangesSince(Number(lastSeq))
+      changes: responseChanges,
+      versions: getVersionsSince(Number(lastVersionSeq)),
+      newVersionSeq: master.versionSeq
     });
 
     console.log('Sync received from:', deviceId);
     console.log('Records uploaded:', changes.length);
-
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Sync failed' });
   }
+});
+
+app.get('/history/:id', (req, res) => {
+  const list = Object.values(master.versions)
+    .filter(v => v.recordId === req.params.id)
+    .sort((a, b) => b.updatedAt - a.updatedAt || b.deviceId.localeCompare(a.deviceId));
+  res.json(list);
 });
 
 app.listen(PORT, '0.0.0.0', () => {
