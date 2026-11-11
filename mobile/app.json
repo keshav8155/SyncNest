@@ -23,7 +23,20 @@
     },
     "plugins": [
       "expo-sqlite",
-      ["expo-camera", { "cameraPermission": "Allow SyncNest to scan the hub QR code" }]
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow SyncNest to scan the hub QR code"
+        }
+      ],
+       [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
     ],
     "extra": {
       "eas": {
