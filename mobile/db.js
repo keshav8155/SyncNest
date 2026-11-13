@@ -391,3 +391,39 @@ export async function getHubIp() {
 export async function setHubIp(ip) {
   await setMeta('hubIp', ip);
 }
+
+
+// ---------- APP SETTINGS ----------
+
+export async function getSetting(key, fallback = null) {
+  const result = await database.getFirstAsync(
+    'SELECT value FROM meta WHERE key = ?',
+    [`setting:${key}`]
+  );
+
+  return result?.value ?? fallback;
+}
+
+export async function setSetting(key, value) {
+  await database.runAsync(
+    'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+    [`setting:${key}`, String(value)]
+  );
+}
+
+export async function getDeviceName() {
+  return await getSetting(
+    'deviceName',
+    currentDeviceId || 'Field Device'
+  );
+}
+
+export async function setDeviceName(name) {
+  const cleanName = name.trim();
+
+  if (!cleanName) {
+    throw new Error('Device name cannot be empty');
+  }
+
+  await setSetting('deviceName', cleanName);
+}

@@ -6,6 +6,13 @@ const os = require('os');
 const QRCode = require('qrcode');
 const app = express();
 
+
+// Devices currently editing records
+const editingPresence = new Map();
+
+const PRESENCE_TIMEOUT = 15000;
+
+
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
@@ -260,6 +267,54 @@ app.get('/history/:id', (req, res) => {
     .sort((a, b) => b.updatedAt - a.updatedAt || b.deviceId.localeCompare(a.deviceId));
   res.json(list);
 });
+
+
+// ---------- LIVE EDITING PRESENCE ----------
+
+app.post('/presence', (req, res) => {
+  const {
+    deviceId,
+    deviceName,
+    recordId,
+    editing
+  } = req.body;
+
+  if (
+    typeof deviceId !== 'string' ||
+    typeof recordId !== 'string'
+  ) {
+    return res.status(400).json({
+      error: 'Invalid presence payload'
+    });
+  }
+
+  if (editing) {
+    editingPresence.set(deviceId, {
+      deviceId,
+      deviceName: deviceName || deviceId,
+      recordId,
+      lastSeen: Date.now()
+    });
+  } else {
+    editingPresence.delete(deviceId);
+  }
+
+  res.json({ success: true });
+});
+
+app.get('/presence', (req, res) => {
+  const now = Date.now();
+
+  // Remove devices that stopped sending heartbeats
+  for (const [id, device] of editingPresence.entries()) {
+    if (now - device.lastSeen > PRESENCE_TIMEOUT) {
+      editingPresence.delete(id);
+    }
+  }
+
+  res.json(Array.from(editingPresence.values()));
+});
+
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log('SyncNest Mock Hub running!');

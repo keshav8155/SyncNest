@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -20,6 +20,11 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
 
 import {
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
+
+import {
   initDb,
   getDeviceId,
   getLastSeq,
@@ -38,6 +43,10 @@ import {
   getLastVersionSeq,
   getHubIp,
   setHubIp,
+  getSetting,
+  setSetting,
+  getDeviceName,
+  setDeviceName,
 } from './db';
 
 // ---------------- CONFIGURATION ----------------
@@ -45,7 +54,7 @@ import {
 const DEFAULT_PC_IP = '192.168.1.8';
 const SERVER_PORT = 3000;
 
-const C = {
+const DARK_COLORS = {
   bg: '#12141A',
   card: '#1E2128',
   border: '#2A2E37',
@@ -56,6 +65,19 @@ const C = {
   green: '#6FD99B',
   amber: '#F6CF7A',
   red: '#FF6B6B',
+};
+
+const LIGHT_COLORS = {
+  bg: '#F4F7F8',
+  card: '#FFFFFF',
+  border: '#E1E8EA',
+  text: '#17252A',
+  muted: '#718087',
+  teal: '#159E96',
+  tealDark: '#DDF4F1',
+  green: '#238653',
+  amber: '#B7791F',
+  red: '#D64545',
 };
 
 const PRIORITY = {
@@ -87,8 +109,29 @@ function formatDate(ms) {
 // ---------------- MAIN APP ----------------
 
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <MainApp />
+    </SafeAreaProvider>
+  );
+  }
+
+
+function MainApp() {
+
+  const insets = useSafeAreaInsets();
+
+  const [theme, setTheme] = useState('dark');
+
+  const C = theme === 'dark' ? DARK_COLORS : LIGHT_COLORS;
+
+  const styles = useMemo(() => createStyles(C), [C]);
+
   const [cards, setCards] = useState([]);
   const [deviceId, setDeviceId] = useState('Loading...');
+  const [deviceName, setDeviceNameState] = useState('');
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [deviceNameInput, setDeviceNameInput] = useState('');
   const [lastSeq, setLastSeq] = useState(0);
 
   const [autoSync, setAutoSync] = useState(true);
@@ -98,6 +141,8 @@ export default function App() {
 
   const [pcIp, setPcIp] = useState(DEFAULT_PC_IP);
   const [filter, setFilter] = useState('All');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortMode, setSortMode] = useState('newest');
 
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -108,6 +153,7 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [versions, setVersions] = useState([]);
   const [editingId, setEditingId] = useState(null);
+  const [editingDevices, setEditingDevices] = useState([]);
   const [toast, setToast] = useState('');
 
   // Form fields
@@ -122,6 +168,20 @@ export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
   const scannedRef = useRef(false);
 
+  // Toggle Theme
+
+  async function toggleTheme() {
+  const nextTheme = theme === 'dark' ? 'light' : 'dark';
+
+  setTheme(nextTheme);
+
+  try {
+    await setSetting('theme', nextTheme);
+  } catch (error) {
+    console.log('Theme save error:', error);
+  }
+}
+
   // ---------------- DATABASE INITIALIZATION ----------------
 
   useEffect(() => {
@@ -130,11 +190,15 @@ export default function App() {
     async function startApp() {
       try {
         const id = await initDb();
+        const savedTheme = await getSetting('theme', 'dark');
         const records = await getAllRecords();
         const seq = await getLastSeq();
         const savedIp = await getHubIp();
 
         if (mounted) {
+          if (savedTheme === 'light' || savedTheme === 'dark') {
+            setTheme(savedTheme);
+          }
           setDeviceId(id);
           setCards(records);
           setLastSeq(seq);
@@ -187,6 +251,39 @@ export default function App() {
     }, 3000);
   }
 
+  // ---------------- LIVE EDITING PRESENCE ----------------
+
+  async function sendEditingPresence(recordId, editing) {
+    if (!recordId) return;
+
+    try {
+      await fetch(
+        `http://${pcIpRef.current.trim()}:${SERVER_PORT}/presence`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceId: getDeviceId(),
+            deviceName: deviceName || deviceId,
+            recordId,
+            editing,
+          }),
+        }
+      );
+    } catch (error) {
+      console.log('Presence update error:', error?.message || error);
+    }
+  }
+
+  function closeEditor() {
+    if (editingId) {
+      sendEditingPresence(editingId, false);
+    }
+
+    setShowHistory(false);
+    setModalVisible(false);
+  }
+
   // ---------------- OPEN NEW / EDIT ----------------
 
   function openNew() {
@@ -207,6 +304,7 @@ export default function App() {
     } catch {}
 
     setEditingId(item.id);
+    sendEditingPresence(item.id, true);
     setShowHistory(false);
     setTitle(c.title || '');
     setBody(c.body || '');
@@ -251,6 +349,10 @@ export default function App() {
       }
 
       await refreshCards();
+      
+      if (editingId) {
+        sendEditingPresence(editingId, false);
+      }
 
       setEditingId(null);
       setTitle('');
@@ -282,6 +384,11 @@ export default function App() {
           onPress: async () => {
             await deleteRecordLocally(editingId);
             await refreshCards();
+
+            if (editingId) {
+              sendEditingPresence(editingId, false);
+            }
+
             setEditingId(null);
             setModalVisible(false);
             showToast('Moved to Recently deleted · Pending sync');
@@ -327,6 +434,11 @@ export default function App() {
     );
 
     await refreshCards();
+
+    if (editingId) {
+      sendEditingPresence(editingId, false);
+    }
+
     setShowHistory(false);
     setModalVisible(false);
     setEditingId(null);
@@ -487,6 +599,71 @@ async function handleScanned({ data }) {
     return () => clearInterval(id);
   }, [loading, autoSync]);
 
+  // DEVICE NAME
+
+  useEffect(() => {
+  if (loading) return;
+
+  let active = true;
+
+  async function loadDeviceName() {
+    try {
+      const name = await getDeviceName();
+
+      if (active) {
+        setDeviceNameState(name);
+      }
+    } catch (error) {
+      console.log('Device name load error:', error);
+    }
+  }
+
+  loadDeviceName();
+
+  return () => {
+    active = false;
+  };
+}, [loading]);
+
+  // ---------------- CHECK OTHER DEVICES EDITING ----------------
+
+  useEffect(() => {
+    if (loading) return;
+
+    let active = true;
+
+    async function checkEditingDevices() {
+      try {
+        const response = await fetch(
+          `http://${pcIpRef.current.trim()}:${SERVER_PORT}/presence`
+        );
+
+        if (!response.ok) return;
+
+        const devices = await response.json();
+
+        if (active && Array.isArray(devices)) {
+          setEditingDevices(
+            devices.filter(
+              (device) => device.deviceId !== getDeviceId()
+            )
+          );
+        }
+      } catch {
+        // Hub may temporarily be unavailable
+      }
+    }
+
+    checkEditingDevices();
+
+    const interval = setInterval(checkEditingDevices, 3000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [loading, pcIp]);
+
   // ---------------- FILTER RECORDS ----------------
 
   const activeCards = cards.filter(
@@ -497,17 +674,56 @@ async function handleScanned({ data }) {
     (record) => Number(record.deleted) === 1
   );
 
-  const visibleCards =
-    filter === 'All'
-      ? activeCards
-      : activeCards.filter((record) => {
-          try {
-            const content = JSON.parse(record.content);
-            return content.status === filter;
-          } catch {
-            return false;
-          }
-        });
+  const visibleCards = activeCards.filter((record) => {
+  let content = {};
+
+  try {
+    content = JSON.parse(record.content);
+  } catch {
+    return false;
+  }
+
+  // Apply status filter
+  const matchesStatus =
+    filter === 'All' || content.status === filter;
+
+  // Search title, description, and location
+  const query = searchQuery.trim().toLowerCase();
+
+  const matchesSearch =
+    !query ||
+    (content.title || '').toLowerCase().includes(query) ||
+    (content.body || '').toLowerCase().includes(query) ||
+    (content.location || '').toLowerCase().includes(query);
+
+  return matchesStatus && matchesSearch;
+});
+
+// SORT VISIBLE RECORDS
+visibleCards.sort((a, b) => {
+  if (sortMode === 'oldest') {
+    return new Date(a.updatedAt || 0) - new Date(b.updatedAt || 0);
+  }
+
+  if (sortMode === 'priority') {
+    const priorityRank = {
+      High: 3,
+      Medium: 2,
+      Low: 1,
+    };
+
+    const contentA = JSON.parse(a.content || '{}');
+    const contentB = JSON.parse(b.content || '{}');
+
+    return (
+      (priorityRank[contentB.priority] || 0) -
+      (priorityRank[contentA.priority] || 0)
+    );
+  }
+
+  // Default: newest first
+  return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+});
 
   // Counts deleted records too, because they also need to sync.
   const pendingCount = cards.filter(
@@ -529,9 +745,18 @@ async function handleScanned({ data }) {
     const s = STATUS[content.status] || STATUS['To do'];
 
     const isPending = Number(item.pending) === 1;
+    const editors = editingDevices.filter(
+      (device) => device.recordId === item.id
+    );
 
     return (
-      <Pressable style={styles.card} onPress={() => openEdit(item)}>
+      <Pressable
+        style={[
+          styles.card,
+          editors.length > 0 && styles.cardBeingEdited,
+        ]}
+        onPress={() => openEdit(item)}
+      >
         <View style={styles.cardTop}>
           <Text style={styles.cardTitle}>
             {content.title || 'Untitled Record'}
@@ -574,14 +799,29 @@ async function handleScanned({ data }) {
             </Text>
           </View>
 
-          <Text
-            style={[
-              styles.syncLabel,
-              { color: isPending ? C.amber : C.green },
-            ]}
-          >
-            {isPending ? '◷ Pending' : '✓ Synced'}
-          </Text>
+          <View style={{ alignItems: 'flex-end' }}>
+  <Text
+    style={[
+      styles.syncLabel,
+      { color: isPending ? C.amber : C.green },
+    ]}
+  >
+    {isPending ? '◷ Pending' : '✓ Synced'}
+  </Text>
+
+  {editors.length > 0 && (
+    <Text
+      style={{
+        color: C.teal,
+        fontSize: 10,
+        fontWeight: '800',
+        marginTop: 6,
+      }}
+    >
+      ● {editors.map((device) => device.deviceName).join(', ')} editing
+    </Text>
+  )}
+</View>
         </View>
       </Pressable>
     );
@@ -630,27 +870,52 @@ async function handleScanned({ data }) {
 
   return (
     <KeyboardAvoidingView
-      style={styles.container}
+      style={[
+        styles.container,
+        { paddingTop: Math.max(insets.top, 12) },
+      ]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <StatusBar style="light" />
+      <StatusBar style={theme === 'dark' ? 'light' : 'dark'} />
 
       {/* HEADER */}
 
-      <View style={styles.headerRow}>
-        <View>
-          <Text style={styles.title}>SyncNest</Text>
+    <View style={styles.headerRow}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.title}>SyncNest</Text>
 
-          <Text style={styles.subtitle}>
-            Field Operations · {deviceId}
+        <Text style={styles.subtitle}>
+          Field Operations · {deviceName || deviceId}
+        </Text>
+      </View>
+
+      <View style={styles.headerActions}>
+        <Pressable
+          style={styles.themeButton}
+          onPress={toggleTheme}
+        >
+          <Text style={styles.themeButtonText}>
+            {theme === 'dark' ? '☀' : '☾'}
           </Text>
-        </View>
+        </Pressable>
+
+        <Pressable
+          style={styles.themeButton}
+          onPress={() => {
+            setDeviceNameInput(deviceName);
+            setSettingsVisible(true);
+          }}
+        >
+          <Text style={styles.themeButtonText}>⚙</Text>
+        </Pressable>
 
         <View
           style={[
             styles.connectionBadge,
             {
-              backgroundColor: connected ? '#173A2B' : '#352C1C',
+              backgroundColor: connected
+                ? (theme === 'dark' ? '#173A2B' : '#DDF4E5')
+                : (theme === 'dark' ? '#352C1C' : '#FFF1D6'),
             },
           ]}
         >
@@ -665,7 +930,9 @@ async function handleScanned({ data }) {
 
           <Text
             style={{
-              color: connected ? C.green : C.amber,
+              color: connected
+                ? (theme === 'dark' ? C.green : '#238653')
+                : (theme === 'dark' ? C.amber : '#946200'),
               fontWeight: '700',
               fontSize: 12,
             }}
@@ -674,107 +941,152 @@ async function handleScanned({ data }) {
           </Text>
         </View>
       </View>
-
-      {/* CONNECTION BANNER */}
-
-      <View style={styles.banner}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.bannerTitle}>PC Hub Connection</Text>
-
-          <Text style={styles.bannerSub}>
-            {pendingCount} pending · Sequence {lastSeq}
-          </Text>
-        </View>
-
-        <Pressable
-          style={[styles.syncButton, syncing && { opacity: 0.6 }]}
-          onPress={() => syncNow()}
-          disabled={syncing}
-        >
-          {syncing ? (
-            <ActivityIndicator color="#0B1F1D" />
-          ) : (
-            <Text style={styles.syncButtonText}>Sync Now</Text>
-          )}
-        </Pressable>
-      </View>
-
-      {/* PC IP ADDRESS */}
-
-      <View style={styles.ipContainer}>
-        <View style={styles.ipHeader}>
-          <Text style={styles.ipLabel}>HUB IP ADDRESS</Text>
-
-          <View style={styles.autoRow}>
-            <Text style={styles.autoLabel}>Auto-sync</Text>
-            <Switch
-              value={autoSync}
-              onValueChange={setAutoSync}
-              trackColor={{ false: C.border, true: C.tealDark }}
-              thumbColor={autoSync ? C.teal : C.muted}
-            />
-          </View>
-        </View>
-
-        <View style={styles.ipRow}>
-          <TextInput
-            style={[styles.ipInput, { flex: 1 }]}
-            value={pcIp}
-            onChangeText={(text) => {
-              setPcIp(text);
-              pcIpRef.current = text;
-            }}
-            onEndEditing={() => setHubIp(pcIpRef.current.trim())}
-            placeholder="192.168.1.9"
-            placeholderTextColor={C.muted}
-            autoCapitalize="none"
-            keyboardType="numeric"
-          />
-
-          <Pressable style={styles.scanButton} onPress={openScanner}>
-            <Text style={styles.scanButtonText}>Scan QR</Text>
-          </Pressable>
-        </View>
-      </View>
-
-      {/* RECENTLY DELETED LINK */}
-
-      <Pressable
-        style={styles.trashLink}
-        onPress={() => setTrashVisible(true)}
-      >
-        <Text style={styles.trashLinkText}>
-          🗑 Recently deleted ({deletedCards.length})
-        </Text>
-      </Pressable>
-
-      {/* FILTER CHIPS */}
-
-      <View style={styles.filterRow}>
-        {FILTERS.map((item) => (
-          <Pressable
-            key={item}
-            onPress={() => setFilter(item)}
-            style={[
-              styles.filterChip,
-              filter === item && styles.filterChipActive,
-            ]}
-          >
-            <Text
-              style={[
-                styles.filterText,
-                filter === item && styles.filterTextActive,
-              ]}
-            >
-              {item}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
+    </View>
 
       {/* CARD LIST */}
 
       <FlatList
+        ListHeaderComponent={
+          <View>
+            {/* CONNECTION BANNER */}
+            <View style={styles.banner}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.bannerTitle}>PC Hub Connection</Text>
+                <Text style={styles.bannerSub}>
+                  {pendingCount} pending · Sequence {lastSeq}
+                </Text>
+              </View>
+
+              <Pressable
+                style={[styles.syncButton, syncing && { opacity: 0.6 }]}
+                onPress={() => syncNow()}
+                disabled={syncing}
+              >
+                {syncing ? (
+                  <ActivityIndicator color="#0B1F1D" />
+                ) : (
+                  <Text style={styles.syncButtonText}>Sync Now</Text>
+                )}
+              </Pressable>
+            </View>
+
+            {/* PC IP ADDRESS */}
+            <View style={styles.ipContainer}>
+              <View style={styles.ipHeader}>
+                <Text style={styles.ipLabel}>HUB IP ADDRESS</Text>
+                <View style={styles.autoRow}>
+                  <Text style={styles.autoLabel}>Auto-sync</Text>
+                  <Switch
+                    value={autoSync}
+                    onValueChange={setAutoSync}
+                    trackColor={{ false: C.border, true: C.tealDark }}
+                    thumbColor={autoSync ? C.teal : C.muted}
+                  />
+                </View>
+              </View>
+
+              <View style={styles.ipRow}>
+                <TextInput
+                  style={[styles.ipInput, { flex: 1 }]}
+                  value={pcIp}
+                  onChangeText={(text) => {
+                    setPcIp(text);
+                    pcIpRef.current = text;
+                  }}
+                  onEndEditing={() => setHubIp(pcIpRef.current.trim())}
+                  placeholder="192.168.1.9"
+                  placeholderTextColor={C.muted}
+                  autoCapitalize="none"
+                  keyboardType="numeric"
+                />
+
+                <Pressable style={styles.scanButton} onPress={openScanner}>
+                  <Text style={styles.scanButtonText}>Scan QR</Text>
+                </Pressable>
+              </View>
+            </View>
+
+            {/* RECENTLY DELETED */}
+            <Pressable
+              style={styles.trashLink}
+              onPress={() => setTrashVisible(true)}
+            >
+              <Text style={styles.trashLinkText}>
+                🗑 Recently deleted ({deletedCards.length})
+              </Text>
+            </Pressable>
+
+            {/* SEARCH */}
+            <View style={styles.searchContainer}>
+              <Text style={styles.searchIcon}>⌕</Text>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search records, descriptions, locations..."
+                placeholderTextColor={C.muted}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                autoCapitalize="none"
+                returnKeyType="search"
+              />
+              {searchQuery.length > 0 && (
+                <Pressable onPress={() => setSearchQuery('')}>
+                  <Text style={styles.clearSearch}>✕</Text>
+                </Pressable>
+              )}
+            </View>
+
+            {/* SORT */}
+            <View style={styles.sortRow}>
+              <Text style={styles.sortLabel}>SORT BY</Text>
+              {[
+                { key: 'newest', label: 'Newest' },
+                { key: 'oldest', label: 'Oldest' },
+                { key: 'priority', label: 'Priority' },
+              ].map((item) => (
+                <Pressable
+                  key={item.key}
+                  onPress={() => setSortMode(item.key)}
+                  style={[
+                    styles.sortButton,
+                    sortMode === item.key && styles.sortButtonActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.sortButtonText,
+                      sortMode === item.key && styles.sortButtonTextActive,
+                    ]}
+                  >
+                    {item.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            {/* FILTER CHIPS */}
+            <View style={styles.filterRow}>
+              {FILTERS.map((item) => (
+                <Pressable
+                  key={item}
+                  onPress={() => setFilter(item)}
+                  style={[
+                    styles.filterChip,
+                    filter === item && styles.filterChipActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.filterText,
+                      filter === item && styles.filterTextActive,
+                    ]}
+                  >
+                    {item}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        }
         data={visibleCards}
         keyExtractor={(item) => item.id}
         renderItem={renderCard}
@@ -789,9 +1101,17 @@ async function handleScanned({ data }) {
         }
       />
 
+
       {/* BOTTOM BAR */}
 
-      <View style={styles.bottomBar}>
+      <View
+        style={[
+          styles.bottomBar,
+          {
+            paddingBottom: Math.max(insets.bottom, 12) + 8,
+          },
+        ]}
+      >
         <View style={{ flex: 1 }}>
           {toast !== '' && (
             <View style={styles.toast}>
@@ -815,7 +1135,7 @@ async function handleScanned({ data }) {
           if (showHistory) {
             setShowHistory(false);
           } else {
-            setModalVisible(false);
+            closeEditor();
           }
         }}
       >
@@ -1006,7 +1326,7 @@ async function handleScanned({ data }) {
                   </Pressable>
                 )}
 
-                <Pressable onPress={() => setModalVisible(false)}>
+                <Pressable onPress={closeEditor}>
                   <Text style={styles.cancel}>Cancel</Text>
                 </Pressable>
               </>
@@ -1071,18 +1391,65 @@ async function handleScanned({ data }) {
           </Text>
         </View>
       </Modal>
+
+      {/* SETTINGS SCREEN */}
+<Modal
+  visible={settingsVisible}
+  animationType="slide"
+  transparent
+  onRequestClose={() => setSettingsVisible(false)}
+>
+  <View style={styles.modalBackdrop}>
+    <View style={styles.modalBox}>
+      <Text style={styles.modalTitle}>Settings</Text>
+
+      <Text style={styles.label}>Device Name</Text>
+
+      <TextInput
+        style={styles.input}
+        value={deviceNameInput}
+        onChangeText={setDeviceNameInput}
+        placeholder="Enter device name"
+        placeholderTextColor={C.muted}
+        maxLength={30}
+      />
+
+      <Pressable
+        style={styles.saveButton}
+        onPress={async () => {
+          try {
+            await setDeviceName(deviceNameInput);
+            setDeviceNameState(deviceNameInput.trim());
+            setSettingsVisible(false);
+            showToast('Device name updated');
+          } catch (error) {
+            Alert.alert('Invalid name', error.message);
+          }
+        }}
+      >
+        <Text style={styles.saveButtonText}>Save Device Name</Text>
+      </Pressable>
+
+      <Pressable onPress={() => setSettingsVisible(false)}>
+        <Text style={styles.cancel}>Close</Text>
+      </Pressable>
+    </View>
+  </View>
+</Modal>
     </KeyboardAvoidingView>
   );
 }
 
 
+
 // ---------------- STYLES ----------------
 
-const styles = StyleSheet.create({
+function createStyles(C) {
+  return StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: C.bg,
-    paddingTop: 54,
+    paddingTop: 16,
   },
 
   loadingScreen: {
@@ -1098,34 +1465,42 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
 
+
   // HEADER
 
   headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
+  flexDirection: 'row',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  paddingHorizontal: 20,
+  paddingVertical: 5,
+  marginBottom: 4,
+},
 
   title: {
-    fontSize: 30,
-    fontWeight: 'bold',
+    fontSize: 32,
+    fontWeight: '800',
     color: C.text,
+    letterSpacing: -0.8,
   },
 
   subtitle: {
-    color: C.muted,
-    fontSize: 12,
-    marginTop: 4,
-  },
+  color: C.muted,
+  fontSize: 11,
+  marginTop: 5,
+  letterSpacing: 0.2,
+  paddingRight: 4,
+},
 
   connectionBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 13,
     paddingVertical: 9,
     borderRadius: 20,
-    gap: 7,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: C.border,
   },
 
   connectionDot: {
@@ -1134,69 +1509,80 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
 
+
+
   // CONNECTION BANNER
 
   banner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1B1E25',
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: 16,
-    padding: 14,
-    marginHorizontal: 16,
-    marginTop: 20,
-  },
+  flexDirection: 'row',
+  alignItems: 'center',
+  backgroundColor: C.tealDark,
+  borderWidth: 1,
+  borderColor: C.border,
+  borderRadius: 18,
+  padding: 16,
+  marginHorizontal: 18,
+  marginTop: 20,
+},
 
   bannerTitle: {
     color: C.text,
-    fontWeight: '700',
-    fontSize: 14,
+    fontWeight: '800',
+    fontSize: 15,
+    letterSpacing: 0.2,
   },
 
   bannerSub: {
     color: C.muted,
     fontSize: 12,
-    marginTop: 5,
+    marginTop: 6,
   },
 
   syncButton: {
     backgroundColor: C.teal,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    minWidth: 95,
+    borderRadius: 13,
+    paddingHorizontal: 17,
+    paddingVertical: 13,
+    minWidth: 100,
     alignItems: 'center',
+    justifyContent: 'center',
   },
 
   syncButtonText: {
     color: '#0B1F1D',
-    fontWeight: '700',
+    fontWeight: '800',
+    fontSize: 13,
   },
+
 
   // IP ADDRESS
 
   ipContainer: {
     marginHorizontal: 18,
-    marginTop: 14,
+    marginTop: 8,
+    padding: 14,
+    backgroundColor: C.card,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: C.border,
   },
 
   ipLabel: {
     color: C.muted,
     fontSize: 10,
-    fontWeight: '700',
+    fontWeight: '800',
     marginBottom: 5,
-    letterSpacing: 1,
+    letterSpacing: 1.2,
   },
 
   ipInput: {
-    backgroundColor: C.card,
+    backgroundColor: C.bg,
     color: C.text,
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
+    borderRadius: 11,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
     fontSize: 14,
   },
 
@@ -1205,7 +1591,7 @@ const styles = StyleSheet.create({
   trashLink: {
     alignSelf: 'flex-end',
     marginRight: 18,
-    marginTop: 12,
+    marginTop: 4,
   },
 
   trashLinkText: {
@@ -1214,13 +1600,87 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
+
+  // SEARCH
+
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.card,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 14,
+    marginHorizontal: 18,
+    marginTop: 10,
+    paddingHorizontal: 14,
+    height: 50,
+  },
+
+  searchIcon: {
+    color: C.teal,
+    fontSize: 25,
+    marginRight: 10,
+  },
+
+  searchInput: {
+    flex: 1,
+    color: C.text,
+    fontSize: 13,
+    paddingVertical: 8,
+  },
+
+  clearSearch: {
+    color: C.muted,
+    fontSize: 17,
+    padding: 5,
+  },
+
+  // SORT
+  sortRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    marginTop: 8,
+    marginBottom: 6,
+    gap: 8,
+  },
+  sortLabel: {
+    color: C.muted,
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 1,
+    marginRight: 3,
+  },
+  sortButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: C.card,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  sortButtonActive: {
+    backgroundColor: C.tealDark,
+    borderColor: C.teal,
+  },
+  sortButtonText: {
+    color: C.muted,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  sortButtonTextActive: {
+    color: C.teal,
+    fontWeight: '800',
+  },
+
   // FILTERS
 
   filterRow: {
     flexDirection: 'row',
     gap: 8,
     paddingHorizontal: 16,
-    marginVertical: 16,
+    marginTop: 8,
+    marginBottom: 8,
   },
 
   filterChip: {
@@ -1248,22 +1708,40 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
+
   // CARDS
 
   listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 20,
-    flexGrow: 1,
-  },
+  paddingHorizontal: 18,
+  paddingTop: 8,
+  paddingBottom: 110,
+  flexGrow: 1,
+},
 
   card: {
     backgroundColor: C.card,
     borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
+    borderColor: '#303640',
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 14,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
   },
+
+  cardBeingEdited: {
+  borderWidth: 1.5,
+  borderColor: C.teal,
+  borderStyle: 'dotted',
+  shadowColor: C.teal,
+  shadowOffset: { width: 0, height: 0 },
+  shadowOpacity: 0.45,
+  shadowRadius: 10,
+  elevation: 6,
+},
 
   cardTop: {
     flexDirection: 'row',
@@ -1274,34 +1752,38 @@ const styles = StyleSheet.create({
   cardTitle: {
     color: C.text,
     fontSize: 17,
-    fontWeight: '700',
+    fontWeight: '800',
     flex: 1,
+    letterSpacing: 0.2,
   },
 
   cardTime: {
     color: C.muted,
     fontSize: 11,
-    marginLeft: 8,
+    marginLeft: 10,
   },
 
   cardBody: {
-    color: C.muted,
-    marginTop: 8,
-    marginBottom: 8,
-    fontSize: 14,
+    color: '#B5BBC5',
+    marginTop: 10,
+    marginBottom: 12,
+    fontSize: 13,
     lineHeight: 21,
   },
 
   cardLocation: {
     color: C.muted,
     fontSize: 12,
-    marginBottom: 12,
+    marginBottom: 15,
   },
 
   cardBottom: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: '#303640',
+    paddingTop: 12,
   },
 
   tags: {
@@ -1312,38 +1794,36 @@ const styles = StyleSheet.create({
   },
 
   tag: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 14,
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 20,
     fontWeight: '700',
-    fontSize: 11,
+    fontSize: 10,
     overflow: 'hidden',
   },
 
   syncLabel: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
     marginLeft: 8,
-  },
-
-  emptyText: {
-    color: C.muted,
-    textAlign: 'center',
-    marginTop: 50,
-    fontSize: 14,
   },
 
   // BOTTOM BAR
 
   bottomBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 28,
-    backgroundColor: C.bg,
-  },
+  position: 'absolute',
+  left: 0,
+  right: 0,
+  bottom: 0,
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'flex-end',
+  paddingHorizontal: 20,
+  paddingTop: 8,
+  backgroundColor: 'transparent',
+  zIndex: 10,
+  elevation: 10,
+},
 
   toast: {
     backgroundColor: '#173A3A',
@@ -1568,4 +2048,28 @@ scanButton: {
 scanButtonText: { color: C.teal, fontWeight: '700', fontSize: 13 },
 camera: { flex: 1, margin: 16, borderRadius: 16, overflow: 'hidden' },
 scanHint: { color: C.muted, textAlign: 'center', paddingBottom: 30 },
+
+headerActions: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 8,
+},
+
+themeButton: {
+  width: 40,
+  height: 40,
+  borderRadius: 14,
+  backgroundColor: C.card,
+  borderWidth: 1,
+  borderColor: C.border,
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+themeButtonText: {
+  color: C.teal,
+  fontSize: 20,
+  fontWeight: '700',
+},
 });
+}
