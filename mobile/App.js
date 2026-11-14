@@ -1001,64 +1001,112 @@ visibleCards.sort((a, b) => {
 
       <FlatList
         ListHeaderComponent={
-          <View>
-            {/* CONNECTION BANNER */}
-            <View style={styles.banner}>
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <Text style={styles.bannerTitle}>PC Hub Connection</Text>
-                <Text style={styles.bannerSub}>
-                  {pendingCount} pending · Sequence {lastSeq}
-                </Text>
-              </View>
+  <View style={{ width: '100%', alignSelf: 'stretch' }}>
 
-              <Pressable
-                style={[styles.syncButton, syncing && { opacity: 0.6 }]}
-                onPress={() => syncNow()}
-                disabled={syncing}
-              >
-                {syncing ? (
-                  <ActivityIndicator color="#0B1F1D" />
-                ) : (
-                  <Text style={styles.syncButtonText}>Sync Now</Text>
-                )}
-              </Pressable>
+      {/* SYNC PANEL */}
+        <View style={styles.syncPanel}>
+          <View style={styles.syncPanelTop}>
+            <View style={styles.syncIcon}>
+             <Text style={styles.syncIconText}>⌘</Text>
             </View>
 
-            {/* PC IP ADDRESS */}
-            <View style={styles.ipContainer}>
-              <View style={styles.ipHeader}>
-                <Text style={styles.ipLabel}>HUB IP ADDRESS</Text>
-                <View style={styles.autoRow}>
-                  <Text style={styles.autoLabel}>Auto-sync</Text>
-                  <Switch
-                    value={autoSync}
-                    onValueChange={setAutoSync}
-                    trackColor={{ false: C.border, true: C.tealDark }}
-                    thumbColor={autoSync ? C.teal : C.muted}
-                  />
-                </View>
-              </View>
-
-              <View style={styles.ipRow}>
-                <TextInput
-                  style={[styles.ipInput, { flex: 1 }]}
-                  value={pcIp}
-                  onChangeText={(text) => {
-                    setPcIp(text);
-                    pcIpRef.current = text;
-                  }}
-                  onEndEditing={() => setHubIp(pcIpRef.current.trim())}
-                  placeholder="192.168.1.9"
-                  placeholderTextColor={C.muted}
-                  autoCapitalize="none"
-                  keyboardType="numeric"
-                />
-
-                <Pressable style={styles.scanButton} onPress={openScanner}>
-                  <Text style={styles.scanButtonText}>Scan QR</Text>
-                </Pressable>
-              </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.syncPanelTitle}>Sync with PC Hub</Text>
+              <Text style={styles.syncPanelSubtitle}>
+                Keep your devices up to date
+              </Text>
             </View>
+
+            <View style={styles.syncStatus}>
+              <View
+                style={[
+                  styles.connectionDot,
+                  { backgroundColor: connected ? C.green : C.amber },
+                ]}
+              />
+              <Text style={styles.syncStatusText}>
+                {connected ? 'Online' : 'Offline'}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.syncDivider} />
+
+          <View style={styles.syncPanelBottom}>
+            <View>
+              <Text style={styles.pendingCount}>
+                {pendingCount} pending
+              </Text>
+              <Text style={styles.syncSequence}>
+                Sequence #{lastSeq}
+              </Text>
+            </View>
+
+            <Pressable
+              style={[
+                styles.syncButton,
+                syncing && { opacity: 0.6 },
+              ]}
+              onPress={() => syncNow()}
+              disabled={syncing}
+            >
+              {syncing ? (
+                <ActivityIndicator color="#0B1F1D" />
+              ) : (
+                <Text style={styles.syncButtonText}>↻  Sync Now</Text>
+              )}
+            </Pressable>
+          </View>
+        </View>   
+
+            {/* HUB CONNECTION */}
+<View style={styles.hubPanel}>
+  <View style={styles.ipHeader}>
+    <View>
+      <Text style={styles.hubPanelTitle}>Connect to Hub</Text>
+      <Text style={styles.hubPanelSubtitle}>
+        Enter your PC's local IP address
+      </Text>
+    </View>
+
+    <View style={styles.autoRow}>
+      <Text style={styles.autoLabel}>Auto-sync</Text>
+      <Switch
+        value={autoSync}
+        onValueChange={setAutoSync}
+        trackColor={{
+          false: C.border,
+          true: C.tealDark,
+        }}
+        thumbColor={autoSync ? C.teal : C.muted}
+      />
+    </View>
+  </View>
+
+  <View style={styles.ipRow}>
+    <TextInput
+      style={[styles.ipInput, { flex: 1 }]}
+      value={pcIp}
+      onChangeText={(text) => {
+        setPcIp(text);
+        pcIpRef.current = text;
+      }}
+      onEndEditing={() => setHubIp(pcIpRef.current.trim())}
+      placeholder="192.168.1.9"
+      placeholderTextColor={C.muted}
+      autoCapitalize="none"
+      keyboardType="numeric"
+    />
+
+    <Pressable
+      style={styles.scanButton}
+      onPress={openScanner}
+    >
+      <Text style={styles.scanButtonIcon}>▦</Text>
+      <Text style={styles.scanButtonText}>Scan QR</Text>
+    </Pressable>
+  </View>
+</View>
 
             {/* RECENTLY DELETED */}
             <Pressable
@@ -1199,6 +1247,25 @@ visibleCards.sort((a, b) => {
           style={styles.modalBackdrop}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
+          {/* BACKGROUND TAP TO CLOSE */}
+          <Pressable
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+            }}
+            onPress={() => {
+              if (showHistory) {
+                setShowHistory(false);
+              } else {
+                closeEditor();
+              }
+            }}
+          />
+
+          {/* MODAL CONTENT */}
           <View style={styles.modalBox}>
             {showHistory ? (
               <>
@@ -1415,7 +1482,9 @@ visibleCards.sort((a, b) => {
             renderItem={renderDeletedCard}
             contentContainerStyle={{ padding: 16 }}
             ListEmptyComponent={
-              <Text style={styles.emptyText}>Nothing here</Text>
+              <Text style={[styles.emptyText, { color: C.muted }]}>
+              Nothing here
+            </Text>
             }
           />
         </View>
@@ -1452,138 +1521,156 @@ visibleCards.sort((a, b) => {
         </View>
       </Modal>
 
-      {/* SETTINGS SCREEN */}
+
+{/* SETTINGS SCREEN */}
 <Modal
   visible={settingsVisible}
   animationType="slide"
   transparent
   navigationBarTranslucent
-  statusBarTranslucent  
+  statusBarTranslucent
   onRequestClose={() => setSettingsVisible(false)}
 >
   <View style={styles.modalBackdrop}>
+
+    {/* BACKGROUND TAP TO CLOSE */}
+    <Pressable
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+      }}
+      onPress={() => setSettingsVisible(false)}
+    />
+
+    {/* SETTINGS CONTENT */}
     <View style={styles.modalBox}>
       <Text style={styles.modalTitle}>Settings</Text>
+
+      {/* APPEARANCE */}
       <View
-  style={{
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 20,
-    marginBottom: 20,
-  }}
->
-  <View>
-    <Text style={{ color: C.text, fontSize: 16, fontWeight: '700' }}>
-      Appearance
-    </Text>
-    <Text style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>
-      {theme === 'dark' ? 'Dark mode' : 'Light mode'}
-    </Text>
-  </View>
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginTop: 20,
+          marginBottom: 20,
+        }}
+      >
+        <View>
+          <Text style={{ color: C.text, fontSize: 16, fontWeight: '700' }}>
+            Appearance
+          </Text>
+          <Text style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>
+            {theme === 'dark' ? 'Dark mode' : 'Light mode'}
+          </Text>
+        </View>
 
-  <Switch
-    value={theme === 'dark'}
-    onValueChange={toggleTheme}
-    trackColor={{ false: C.border, true: C.teal }}
-    thumbColor="#FFFFFF"
-  />
-</View>
+        <Switch
+          value={theme === 'dark'}
+          onValueChange={toggleTheme}
+          trackColor={{ false: C.border, true: C.teal }}
+          thumbColor="#FFFFFF"
+        />
+      </View>
 
-{/* HUB CONNECTION */}
-<View
-  style={{
-    marginTop: 12,
-    padding: 15,
-    backgroundColor: C.bg,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: C.border,
-  }}
->
-  <Text style={{
-    color: C.text,
-    fontSize: 16,
-    fontWeight: '800',
-    marginBottom: 12,
-  }}>
-    PC Hub Connection
-  </Text>
+      {/* HUB CONNECTION */}
+      <View
+        style={{
+          marginTop: 12,
+          padding: 15,
+          backgroundColor: C.bg,
+          borderRadius: 14,
+          borderWidth: 1,
+          borderColor: C.border,
+        }}
+      >
+        <Text style={{
+          color: C.text,
+          fontSize: 16,
+          fontWeight: '800',
+          marginBottom: 12,
+        }}>
+          PC Hub Connection
+        </Text>
 
-  <View style={{
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  }}>
-    <Text style={{ color: C.muted, fontSize: 13 }}>
-      Connection Status
-    </Text>
+        <View style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}>
+          <Text style={{ color: C.muted, fontSize: 13 }}>
+            Connection Status
+          </Text>
 
-    <Text style={{
-      color: connected ? C.green : C.red,
-      fontWeight: '800',
-      fontSize: 13,
-    }}>
-      {connected ? '● Connected' : '● Disconnected'}
-    </Text>
-  </View>
+          <Text style={{
+            color: connected ? C.green : C.red,
+            fontWeight: '800',
+            fontSize: 13,
+          }}>
+            {connected ? '● Connected' : '● Disconnected'}
+          </Text>
+        </View>
 
-  <View style={{
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 12,
-  }}>
-    <Text style={{ color: C.muted, fontSize: 13 }}>
-      PC Hub IP
-    </Text>
-    <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
-      {pcIp}
-    </Text>
-  </View>
-</View>
+        <View style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          marginTop: 12,
+        }}>
+          <Text style={{ color: C.muted, fontSize: 13 }}>
+            PC Hub IP
+          </Text>
+          <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
+            {pcIp}
+          </Text>
+        </View>
+      </View>
 
-{/* ABOUT SYNCNEST */}
-<View
-  style={{
-    marginTop: 18,
-    padding: 15,
-    backgroundColor: C.bg,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: C.border,
-  }}
->
-  <Text style={{
-    color: C.text,
-    fontSize: 16,
-    fontWeight: '800',
-    marginBottom: 12,
-  }}>
-    About SyncNest
-  </Text>
+      {/* ABOUT SYNCNEST */}
+      <View
+        style={{
+          marginTop: 18,
+          padding: 15,
+          backgroundColor: C.bg,
+          borderRadius: 14,
+          borderWidth: 1,
+          borderColor: C.border,
+        }}
+      >
+        <Text style={{
+          color: C.text,
+          fontSize: 16,
+          fontWeight: '800',
+          marginBottom: 12,
+        }}>
+          About SyncNest
+        </Text>
 
-  <View style={{
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  }}>
-    <Text style={{ color: C.muted, fontSize: 13 }}>App Name</Text>
-    <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
-      SyncNest
-    </Text>
-  </View>
+        <View style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          marginBottom: 10,
+        }}>
+          <Text style={{ color: C.muted, fontSize: 13 }}>App Name</Text>
+          <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
+            SyncNest
+          </Text>
+        </View>
 
-  <View style={{
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  }}>
-    <Text style={{ color: C.muted, fontSize: 13 }}>Version</Text>
-    <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
-      2.0.0
-    </Text>
-  </View>
-</View>
+        <View style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+        }}>
+          <Text style={{ color: C.muted, fontSize: 13 }}>Version</Text>
+          <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
+            2.0.0
+          </Text>
+        </View>
+      </View>
 
+      {/* DEVICE NAME */}
       <Text style={styles.label}>Device Name</Text>
 
       <TextInput
@@ -1595,6 +1682,7 @@ visibleCards.sort((a, b) => {
         maxLength={30}
       />
 
+      {/* SAVE */}
       <Pressable
         style={styles.saveButton}
         onPress={async () => {
@@ -1612,12 +1700,15 @@ visibleCards.sort((a, b) => {
         <Text style={styles.saveButtonText}>Save Device Name</Text>
       </Pressable>
 
+      {/* CLOSE */}
       <Pressable onPress={() => setSettingsVisible(false)}>
         <Text style={styles.cancel}>Close</Text>
       </Pressable>
+
     </View>
   </View>
 </Modal>
+
     </KeyboardAvoidingView>
   );
 }
@@ -1688,83 +1779,6 @@ function createStyles(C) {
     width: 8,
     height: 8,
     borderRadius: 4,
-  },
-
-
-
-  // CONNECTION BANNER
-
-  banner: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  backgroundColor: C.tealDark,
-  borderWidth: 1,
-  borderColor: C.border,
-  borderRadius: 18,
-  padding: 16,
-  marginHorizontal: 18,
-  marginTop: 20,
-},
-
-  bannerTitle: {
-    color: C.text,
-    fontWeight: '800',
-    fontSize: 15,
-    letterSpacing: 0.2,
-  },
-
-  bannerSub: {
-    color: C.muted,
-    fontSize: 12,
-    marginTop: 6,
-  },
-
-  syncButton: {
-    backgroundColor: C.teal,
-    borderRadius: 13,
-    paddingHorizontal: 17,
-    paddingVertical: 13,
-    minWidth: 100,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  syncButtonText: {
-    color: '#0B1F1D',
-    fontWeight: '800',
-    fontSize: 13,
-  },
-
-
-  // IP ADDRESS
-
-  ipContainer: {
-    marginHorizontal: 18,
-    marginTop: 8,
-    padding: 14,
-    backgroundColor: C.card,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
-
-  ipLabel: {
-    color: C.muted,
-    fontSize: 10,
-    fontWeight: '800',
-    marginBottom: 5,
-    letterSpacing: 1.2,
-  },
-
-  ipInput: {
-    backgroundColor: C.bg,
-    color: C.text,
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: 11,
-    paddingHorizontal: 13,
-    paddingVertical: 11,
-    fontSize: 14,
   },
 
   // RECENTLY DELETED LINK
@@ -2200,22 +2214,190 @@ function createStyles(C) {
     marginVertical: 4,
   },
 
-  // AUTO SYNC
+// SYNC PANEL
 
-  ipHeader: {
-  flexDirection: 'row',
-  justifyContent: 'space-between',
-  alignItems: 'center',
+syncPanel: {
+  marginHorizontal: 0,
+  marginTop: 18,
+  padding: 16,
+  backgroundColor: C.card,
+  borderRadius: 20,
+  borderWidth: 1,
+  borderColor: C.border,
 },
-autoRow: {
+
+syncPanelTop: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 12,
+},
+
+syncIcon: {
+  width: 44,
+  height: 44,
+  borderRadius: 14,
+  backgroundColor: C.tealDark,
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+syncIconText: {
+  color: C.teal,
+  fontSize: 29,
+  fontWeight: '700',
+},
+
+syncPanelTitle: {
+  color: C.text,
+  fontSize: 15,
+  fontWeight: '800',
+},
+
+syncPanelSubtitle: {
+  color: C.muted,
+  fontSize: 11,
+  marginTop: 4,
+},
+
+syncStatus: {
   flexDirection: 'row',
   alignItems: 'center',
   gap: 6,
+  paddingHorizontal: 10,
+  paddingVertical: 7,
+  borderRadius: 20,
+  backgroundColor: C.bg,
 },
+
+syncStatusText: {
+  color: C.text,
+  fontSize: 11,
+  fontWeight: '700',
+},
+
+syncDivider: {
+  height: 1,
+  backgroundColor: C.border,
+  marginVertical: 15,
+},
+
+syncPanelBottom: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+},
+
+pendingCount: {
+  color: C.text,
+  fontSize: 13,
+  fontWeight: '800',
+},
+
+syncSequence: {
+  color: C.muted,
+  fontSize: 11,
+  marginTop: 4,
+},
+
+syncButton: {
+  backgroundColor: C.teal,
+  borderRadius: 13,
+  paddingHorizontal: 17,
+  paddingVertical: 12,
+  minWidth: 120,
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+syncButtonText: {
+  color: '#0B1F1D',
+  fontWeight: '800',
+  fontSize: 13,
+},
+
+// HUB CONNECTION PANEL
+
+hubPanel: {
+  marginHorizontal: 0,
+  marginTop: 10,
+  padding: 16,
+  backgroundColor: C.card,
+  borderRadius: 20,
+  borderWidth: 1,
+  borderColor: C.border,
+},
+
+ipHeader: {
+  flexDirection: 'row',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  marginBottom: 14,
+},
+
+hubPanelTitle: {
+  color: C.text,
+  fontSize: 14,
+  fontWeight: '800',
+},
+
+hubPanelSubtitle: {
+  color: C.muted,
+  fontSize: 11,
+  marginTop: 4,
+},
+
+autoRow: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 5,
+},
+
 autoLabel: {
   color: C.muted,
   fontSize: 11,
   fontWeight: '700',
+},
+
+ipRow: {
+  flexDirection: 'row',
+  gap: 9,
+  alignItems: 'center',
+},
+
+ipInput: {
+  backgroundColor: C.bg,
+  color: C.text,
+  borderWidth: 1,
+  borderColor: C.border,
+  borderRadius: 12,
+  paddingHorizontal: 12,
+  paddingVertical: 12,
+  fontSize: 13,
+},
+
+scanButton: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 6,
+  backgroundColor: C.tealDark,
+  borderWidth: 1,
+  borderColor: C.teal,
+  borderRadius: 12,
+  paddingHorizontal: 13,
+  paddingVertical: 13,
+},
+
+scanButtonIcon: {
+  color: C.teal,
+  fontSize: 17,
+  fontWeight: '800',
+},
+
+scanButtonText: {
+  color: C.teal,
+  fontWeight: '800',
+  fontSize: 12,
 },
 
 // QR Scanner
