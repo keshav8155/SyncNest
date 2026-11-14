@@ -251,6 +251,37 @@ function MainApp() {
     }, 3000);
   }
 
+  // Register this device permanently on the PC Hub
+async function registerDeviceWithHub(name, ip = pcIpRef.current) {
+  if (!deviceId || deviceId === 'Loading...') return;
+
+  const cleanName = (name || deviceId).trim();
+
+  try {
+    const response = await fetch(
+      `http://${ip.trim()}:${SERVER_PORT}/device/register`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          deviceId,
+          deviceName: cleanName,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error('Device registration failed');
+    }
+
+    console.log('Device registered on PC Hub:', cleanName);
+  } catch (error) {
+    console.log('Device registration error:', error.message);
+  }
+}
+
   // ---------------- LIVE EDITING PRESENCE ----------------
 
   async function sendEditingPresence(recordId, editing) {
@@ -599,31 +630,48 @@ async function handleScanned({ data }) {
     return () => clearInterval(id);
   }, [loading, autoSync]);
 
-  // DEVICE NAME
 
+  // ---------------- DEVICE NAME ----------------
+
+  // Load saved device name
   useEffect(() => {
-  if (loading) return;
+    if (loading) return;
 
-  let active = true;
+    let active = true;
 
-  async function loadDeviceName() {
-    try {
-      const name = await getDeviceName();
+    async function loadDeviceName() {
+      try {
+        const name = await getDeviceName();
 
-      if (active) {
-        setDeviceNameState(name);
+        if (active) {
+          setDeviceNameState(name);
+        }
+      } catch (error) {
+        console.log('Device name load error:', error);
       }
-    } catch (error) {
-      console.log('Device name load error:', error);
     }
-  }
 
-  loadDeviceName();
+    loadDeviceName();
 
-  return () => {
-    active = false;
-  };
-}, [loading]);
+    return () => {
+      active = false;
+    };
+  }, [loading]);
+
+  // Automatically register device with PC Hub
+  useEffect(() => {
+    if (
+      loading ||
+      !deviceId ||
+      deviceId === 'Loading...' ||
+      !deviceName
+    ) {
+      return;
+    }
+
+    registerDeviceWithHub(deviceName, pcIp);
+  }, [loading, deviceId, deviceName, pcIp]);
+
 
   // ---------------- CHECK OTHER DEVICES EDITING ----------------
 
@@ -881,8 +929,14 @@ visibleCards.sort((a, b) => {
       {/* HEADER */}
 
     <View style={styles.headerRow}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.title}>SyncNest</Text>
+      <View style={{ flex: 1, minWidth: 0, marginRight: 12 }}>
+        <Text
+          style={styles.title}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+        >
+          SyncNest
+        </Text>
 
         <Text style={styles.subtitle}>
           Field Operations · {deviceName || deviceId}
@@ -950,7 +1004,7 @@ visibleCards.sort((a, b) => {
           <View>
             {/* CONNECTION BANNER */}
             <View style={styles.banner}>
-              <View style={{ flex: 1 }}>
+              <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={styles.bannerTitle}>PC Hub Connection</Text>
                 <Text style={styles.bannerSub}>
                   {pendingCount} pending · Sequence {lastSeq}
@@ -1131,6 +1185,8 @@ visibleCards.sort((a, b) => {
         visible={modalVisible}
         animationType="slide"
         transparent
+        navigationBarTranslucent
+        statusBarTranslucent
         onRequestClose={() => {
           if (showHistory) {
             setShowHistory(false);
@@ -1340,6 +1396,8 @@ visibleCards.sort((a, b) => {
       <Modal
         visible={trashVisible}
         animationType="slide"
+        navigationBarTranslucent
+        statusBarTranslucent
         onRequestClose={() => setTrashVisible(false)}
       >
         <View style={styles.fullScreen}>
@@ -1368,6 +1426,8 @@ visibleCards.sort((a, b) => {
       <Modal
         visible={scanVisible}
         animationType="slide"
+        navigationBarTranslucent
+        statusBarTranslucent
         onRequestClose={() => setScanVisible(false)}
       >
         <View style={styles.fullScreen}>
@@ -1397,11 +1457,132 @@ visibleCards.sort((a, b) => {
   visible={settingsVisible}
   animationType="slide"
   transparent
+  navigationBarTranslucent
+  statusBarTranslucent  
   onRequestClose={() => setSettingsVisible(false)}
 >
   <View style={styles.modalBackdrop}>
     <View style={styles.modalBox}>
       <Text style={styles.modalTitle}>Settings</Text>
+      <View
+  style={{
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 20,
+    marginBottom: 20,
+  }}
+>
+  <View>
+    <Text style={{ color: C.text, fontSize: 16, fontWeight: '700' }}>
+      Appearance
+    </Text>
+    <Text style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>
+      {theme === 'dark' ? 'Dark mode' : 'Light mode'}
+    </Text>
+  </View>
+
+  <Switch
+    value={theme === 'dark'}
+    onValueChange={toggleTheme}
+    trackColor={{ false: C.border, true: C.teal }}
+    thumbColor="#FFFFFF"
+  />
+</View>
+
+{/* HUB CONNECTION */}
+<View
+  style={{
+    marginTop: 12,
+    padding: 15,
+    backgroundColor: C.bg,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+  }}
+>
+  <Text style={{
+    color: C.text,
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 12,
+  }}>
+    PC Hub Connection
+  </Text>
+
+  <View style={{
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  }}>
+    <Text style={{ color: C.muted, fontSize: 13 }}>
+      Connection Status
+    </Text>
+
+    <Text style={{
+      color: connected ? C.green : C.red,
+      fontWeight: '800',
+      fontSize: 13,
+    }}>
+      {connected ? '● Connected' : '● Disconnected'}
+    </Text>
+  </View>
+
+  <View style={{
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 12,
+  }}>
+    <Text style={{ color: C.muted, fontSize: 13 }}>
+      PC Hub IP
+    </Text>
+    <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
+      {pcIp}
+    </Text>
+  </View>
+</View>
+
+{/* ABOUT SYNCNEST */}
+<View
+  style={{
+    marginTop: 18,
+    padding: 15,
+    backgroundColor: C.bg,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+  }}
+>
+  <Text style={{
+    color: C.text,
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 12,
+  }}>
+    About SyncNest
+  </Text>
+
+  <View style={{
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  }}>
+    <Text style={{ color: C.muted, fontSize: 13 }}>App Name</Text>
+    <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
+      SyncNest
+    </Text>
+  </View>
+
+  <View style={{
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  }}>
+    <Text style={{ color: C.muted, fontSize: 13 }}>Version</Text>
+    <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>
+      2.0.0
+    </Text>
+  </View>
+</View>
 
       <Text style={styles.label}>Device Name</Text>
 
@@ -1419,6 +1600,7 @@ visibleCards.sort((a, b) => {
         onPress={async () => {
           try {
             await setDeviceName(deviceNameInput);
+            await registerDeviceWithHub(deviceNameInput.trim());
             setDeviceNameState(deviceNameInput.trim());
             setSettingsVisible(false);
             showToast('Device name updated');
@@ -1478,12 +1660,11 @@ function createStyles(C) {
 },
 
   title: {
-    fontSize: 32,
-    fontWeight: '800',
-    color: C.text,
-    letterSpacing: -0.8,
-  },
-
+  fontSize: 27,
+  fontWeight: '900',
+  color: C.text,
+  flexShrink: 1,
+},
   subtitle: {
   color: C.muted,
   fontSize: 11,
@@ -1858,20 +2039,22 @@ function createStyles(C) {
   // MODAL
 
   modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'flex-end',
-  },
+  flex: 1,
+  backgroundColor: C.bg === DARK_COLORS.bg
+    ? 'rgba(0,0,0,0.7)'
+    : 'rgba(20,35,40,0.35)',
+  justifyContent: 'flex-end',
+},
 
   modalBox: {
-    backgroundColor: '#1B1E25',
-    padding: 20,
-    paddingBottom: 30,
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
+  padding: 20,
+  paddingBottom: 30,
+  borderTopLeftRadius: 22,
+  borderTopRightRadius: 22,
+  backgroundColor: C.card,
+  borderColor: C.border,
+  borderWidth: 1,
+},
 
   modalTitle: {
     color: C.text,
@@ -2052,6 +2235,7 @@ scanHint: { color: C.muted, textAlign: 'center', paddingBottom: 30 },
 headerActions: {
   flexDirection: 'row',
   alignItems: 'center',
+  flexShrink: 0,
   gap: 8,
 },
 

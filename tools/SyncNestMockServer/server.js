@@ -39,12 +39,68 @@ if (fs.existsSync(DB_FILE)) {
 
 master.versions = master.versions || {};
 master.versionSeq = master.versionSeq || 0;
+master.devices = master.devices || {};
 
 function saveMaster() {
   const tempFile = DB_FILE + '.tmp';
   fs.writeFileSync(tempFile, JSON.stringify(master, null, 2));
   fs.renameSync(tempFile, DB_FILE);
 }
+
+// ---------- PERMANENT DEVICE REGISTRATION ----------
+
+function registerDevice(deviceId, deviceName) {
+  const cleanId = deviceId.trim();
+
+  const cleanName =
+    typeof deviceName === 'string' && deviceName.trim()
+      ? deviceName.trim().slice(0, 30)
+      : cleanId;
+
+  master.devices[cleanId] = {
+    deviceId: cleanId,
+    deviceName: cleanName,
+    updatedAt: new Date().toISOString()
+  };
+
+  saveMaster();
+
+  return master.devices[cleanId];
+}
+
+// Register or update a device name
+app.post('/device/register', (req, res) => {
+  const { deviceId, deviceName } = req.body;
+
+  if (
+    typeof deviceId !== 'string' ||
+    !deviceId.trim()
+  ) {
+    return res.status(400).json({
+      error: 'Invalid device ID'
+    });
+  }
+
+  try {
+    const device = registerDevice(deviceId, deviceName);
+
+    res.json({
+      success: true,
+      device
+    });
+  } catch (error) {
+    console.error('Device registration error:', error);
+
+    res.status(500).json({
+      error: 'Could not register device'
+    });
+  }
+});
+
+// Get all registered devices
+app.get('/devices', (req, res) => {
+  res.json(Object.values(master.devices));
+});
 
 function mergeChanges(incomingChanges) {
   for (const incoming of incomingChanges) {
